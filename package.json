@@ -1,0 +1,46 @@
+{
+	"name": "@svyaddict/pi-git-commands",
+	"version": "0.1.0",
+	"description": "Pi package that adds /git pull and /git branch commands, branch autocomplete and a git-aware footer with ahead/behind counters",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"pi",
+		"pi-coding-agent",
+		"git",
+		"branch",
+		"footer"
+	],
+	"author": "svyaddict (https://github.com/svyaddict)",
+	"license": "MIT",
+	"homepage": "https://github.com/svyaddict/pi-git-commands#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/svyaddict/pi-git-commands.git"
+	},
+	"bugs": {
+		"url": "https://github.com/svyaddict/pi-git-commands/issues"
+	},
+	"files": [
+		"extensions",
+		"README.md",
+		"CHANGELOG.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
