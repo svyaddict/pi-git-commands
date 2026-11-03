@@ -161,6 +161,8 @@ Pi loads TypeScript extensions directly, so no build step is needed. After editi
 
 ```text
 pi-git-commands/
+├── .github/workflows/
+│   └── publish.yml   # Automated npm publishing on version tags
 ├── extensions/
 │   └── index.ts      # Extension entry point
 ├── package.json      # npm metadata + pi manifest
@@ -171,13 +173,22 @@ pi-git-commands/
 
 ### Releasing
 
-```bash
-npm version patch   # or minor / major
-npm publish
-git push --follow-tags
-```
+Releases are fully automated with GitHub Actions ([`.github/workflows/publish.yml`](.github/workflows/publish.yml)) using [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) — no npm tokens are stored in the repository, and every release ships with [provenance](https://docs.npmjs.com/generating-provenance-statements).
 
-Remember to update `CHANGELOG.md` before releasing; pi shows new changelog entries to users after they update.
+1. Add a new `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md` and commit it.
+2. Bump the version (this creates a commit and a `vx.y.z` tag):
+
+   ```bash
+   npm version patch   # or minor / major
+   ```
+
+3. Push the commit and the tag:
+
+   ```bash
+   git push --follow-tags
+   ```
+
+The workflow then checks that the tag is on `main` and matches `package.json`, publishes the package to npm and creates a GitHub Release with the matching changelog notes. Pi shows the new changelog entries to users after they update.
 
 ## Contributing
 
