@@ -2,17 +2,20 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	describeFailure,
 	GIT_NETWORK_TIMEOUT_MS,
+	GitError,
 	getCurrentBranch,
 	localBranchExists,
+	queryGit,
+	refExists,
 	runGit,
 	splitLines,
 } from "../git.ts";
 import { notifyCancelled, plural } from "./shared.ts";
 
 /** Long-lived branches that are never offered for deletion, even when fully merged. */
-const PROTECTED_BRANCHES = new Set(["main", "master", "develop", "dev"]);
+export const PROTECTED_BRANCHES: ReadonlySet<string> = new Set(["main", "master", "develop", "dev"]);
 
-type Candidate = {
+export type Candidate = {
 	name: string;
 	reasons: string[];
 };
@@ -23,9 +26,88 @@ type DeleteOutcome = {
 	failed: string[];
 };
 
+/** A local branch as reported by `git for-each-ref` with {@link LOCAL_BRANCH_FORMAT}. */
+export type LocalBranch = {
+	name: string;
+	/** Commit the branch points to. */
+	oid: string;
+	/** Configured upstream ("origin/x"), empty when none. It is still set when the upstream is gone. */
+	upstream: string;
+	/** `%(upstream:track)`, e.g. "[gone]", "[ahead 1]" or empty. */
+	track: string;
+	/** Path of the worktree that has the branch checked out, empty when none. */
+	worktree: string;
+};
+
+const LOCAL_BRANCH_FORMAT =
+	"%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(worktreepath)";
+
+export function parseLocalBranches(stdout: string): LocalBranch[] {
+	return splitLines(stdout).map((line) => {
+		const [name = "", oid = "", upstream = "", track = "", worktree = ""] = line.split("\0");
+		return { name, oid, upstream, track, worktree };
+	});
+}
+
+export type CleanupInput = {
+	branches: LocalBranch[];
+	/** Names of local branches whose tip is reachable from the base branch. */
+	merged: ReadonlySet<string>;
+	/** Base branch, e.g. "origin/main" or "main". */
+	base?: string;
+	/** Commit the base branch points to. */
+	baseOid?: string;
+	current?: string;
+	protectedNames?: ReadonlySet<string>;
+};
+
+/**
+ * Decide which local branches can be offered for deletion.
+ *
+ * - Upstream deleted on the remote ("[gone]"): offered.
+ * - Merged into the base: offered only if the branch was published (has an upstream) and does
+ *   not point exactly at the base. A branch just created from the base, or never pushed, is
+ *   "merged" for git as well, but is far more likely to be work about to start than work done.
+ * - Never offered: protected names, the current branch, the base, and branches checked out in
+ *   any worktree (git refuses to delete those anyway).
+ */
+export function selectCleanupCandidates(input: CleanupInput): Candidate[] {
+	const protectedNames = new Set(input.protectedNames ?? PROTECTED_BRANCHES);
+	if (input.current) {
+		protectedNames.add(input.current);
+	}
+	if (input.base) {
+		protectedNames.add(input.base);
+		protectedNames.add(input.base.replace(/^[^/]+\//, ""));
+	}
+
+	const candidates: Candidate[] = [];
+	for (const branch of input.branches) {
+		if (!branch.name || protectedNames.has(branch.name) || branch.worktree) {
+			continue;
+		}
+		const reasons: string[] = [];
+		if (branch.track === "[gone]") {
+			reasons.push("upstream deleted");
+		}
+		const isFreshOrPrivate = !branch.upstream || (input.baseOid !== undefined && branch.oid === input.baseOid);
+		if (input.base && input.merged.has(branch.name) && !isFreshOrPrivate) {
+			reasons.push(`merged into ${input.base}`);
+		}
+		if (reasons.length > 0) {
+			candidates.push({ name: branch.name, reasons });
+		}
+	}
+	return candidates.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** The branch other branches get merged into: origin's HEAD, else a local or remote main/master. */
 async function findBaseBranch(cwd: string): Promise<string | undefined> {
 	const originHead = await runGit(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+	// Exit code 1 only means origin/HEAD is not set; anything else is a failure.
+	if (originHead.killed || originHead.code > 1) {
+		throw new GitError("Finding the default branch", originHead);
+	}
 	if (originHead.code === 0 && originHead.stdout.trim()) {
 		return originHead.stdout.trim();
 	}
@@ -35,56 +117,37 @@ async function findBaseBranch(cwd: string): Promise<string | undefined> {
 		}
 	}
 	for (const ref of ["origin/main", "origin/master"]) {
-		const result = await runGit(cwd, ["show-ref", "--verify", "--quiet", `refs/remotes/${ref}`]);
-		if (result.code === 0) {
+		if (await refExists(cwd, `refs/remotes/${ref}`)) {
 			return ref;
 		}
 	}
 	return undefined;
 }
 
-async function findCandidates(cwd: string): Promise<Candidate[]> {
+export async function findCleanupCandidates(cwd: string): Promise<Candidate[]> {
 	const base = await findBaseBranch(cwd);
-	const [trackResult, mergedResult, current] = await Promise.all([
-		runGit(cwd, ["for-each-ref", "refs/heads", "--format=%(refname:short)%09%(upstream:track)"]),
-		base ? runGit(cwd, ["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"]) : undefined,
+	// A failed query must not shrink the protections (e.g. an unknown current branch), so every
+	// query has to succeed.
+	const [branchesResult, mergedResult, baseOidResult, current] = await Promise.all([
+		queryGit(cwd, ["for-each-ref", "refs/heads", `--format=${LOCAL_BRANCH_FORMAT}`], "Listing branches"),
+		base
+			? queryGit(
+					cwd,
+					["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"],
+					"Listing merged branches",
+				)
+			: undefined,
+		base ? queryGit(cwd, ["rev-parse", "--verify", `${base}^{commit}`], "Resolving the default branch") : undefined,
 		getCurrentBranch(cwd),
 	]);
 
-	const protectedNames = new Set(PROTECTED_BRANCHES);
-	if (current) {
-		protectedNames.add(current);
-	}
-	if (base) {
-		protectedNames.add(base.replace(/^[^/]+\//, ""));
-		protectedNames.add(base);
-	}
-
-	const candidates = new Map<string, Candidate>();
-	const addReason = (name: string, reason: string) => {
-		if (protectedNames.has(name)) {
-			return;
-		}
-		const candidate = candidates.get(name) ?? { name, reasons: [] };
-		candidate.reasons.push(reason);
-		candidates.set(name, candidate);
-	};
-
-	if (trackResult.code === 0) {
-		for (const line of splitLines(trackResult.stdout)) {
-			const [name, track] = line.split("\t");
-			if (name && track === "[gone]") {
-				addReason(name, "upstream deleted");
-			}
-		}
-	}
-	if (base && mergedResult?.code === 0) {
-		for (const name of splitLines(mergedResult.stdout)) {
-			addReason(name, `merged into ${base}`);
-		}
-	}
-
-	return Array.from(candidates.values()).sort((a, b) => a.name.localeCompare(b.name));
+	return selectCleanupCandidates({
+		branches: parseLocalBranches(branchesResult.stdout),
+		merged: new Set(mergedResult ? splitLines(mergedResult.stdout) : []),
+		base,
+		baseOid: baseOidResult?.stdout.trim(),
+		current,
+	});
 }
 
 function describeCandidate(candidate: Candidate): string {
@@ -149,7 +212,7 @@ export async function handleGitCleanup(ctx: ExtensionCommandContext): Promise<vo
 		);
 	}
 
-	const candidates = await findCandidates(ctx.cwd);
+	const candidates = await findCleanupCandidates(ctx.cwd);
 	if (candidates.length === 0) {
 		ctx.ui.notify("No branches to clean up.", "info");
 		return;
@@ -173,12 +236,15 @@ export async function handleGitCleanup(ctx: ExtensionCommandContext): Promise<vo
 		outcome,
 	);
 
-	// Branches merged with squash or rebase look unmerged to git; deleting them needs -D.
+	// Branches merged with squash or rebase look unmerged to git; deleting them needs -D. A deleted
+	// upstream does not prove the work was merged, so say plainly what force-deleting means.
 	if (outcome.notMerged.length > 0) {
 		const force = await ctx.ui.confirm(
 			"Branches not fully merged",
-			`${plural(outcome.notMerged.length, "branch has", "branches have")} commits that are not merged ` +
-				`(common after squash or rebase merges): ${outcome.notMerged.join(", ")}. Force delete them?`,
+			`${plural(outcome.notMerged.length, "branch has", "branches have")} commits that git cannot find ` +
+				`in the base branch: ${outcome.notMerged.join(", ")}. This is normal after squash or rebase merges, ` +
+				"but it can also mean the work was never merged. Force delete them? " +
+				"The summary will show the commit to restore each one from.",
 		);
 		const notMerged = outcome.notMerged;
 		outcome.notMerged = [];
