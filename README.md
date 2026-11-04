@@ -29,10 +29,10 @@
 
 ## Features
 
-- 🔄 **`/git pull`** — `git fetch --prune` + `git pull` in a single command.
+- 🔄 **`/git pull`** — pull and prune stale remote-tracking branches in a single command (`git pull --prune`).
 - 🌿 **`/git branch`** — list local branches, highlighting the current one and branches that exist only locally.
-- 🔀 **`/git branch <name>`** — switch to a branch, or create it (with confirmation) if it does not exist yet.
-- ⌨️ **Autocomplete** — subcommands and local branch names are suggested as you type.
+- 🔀 **`/git branch <name>`** — switch to a local branch, check out a remote branch with tracking, or create a new branch (with confirmation).
+- ⌨️ **Autocomplete** — subcommands, local branches and remote-only branches are suggested as you type.
 - 📊 **Git-aware footer** — current branch with `↓incoming ↑outgoing` commit counters, refreshed automatically, alongside the usual token, cost and context stats.
 
 ## Installation
@@ -77,7 +77,12 @@ The extension activates automatically when pi starts inside a git repository.
 /git pull
 ```
 
-Runs `git fetch --prune` followed by `git pull` in the current working directory and reports the result as a notification.
+Runs `git pull --prune` in the current working directory: it fetches, removes remote-tracking branches that no longer exist on the remote, and merges or rebases according to your git configuration. The result is reported as a short notification. The command times out after 120 seconds.
+
+If the current branch has no upstream:
+
+- and a branch with the same name exists on a remote, pi offers to set it as upstream (`git branch --set-upstream-to`) and then pulls;
+- otherwise pi explains that there is nothing to pull and suggests pushing the branch with `git push -u`.
 
 ### `/git branch`
 
@@ -105,13 +110,16 @@ Switch to a branch, or create it:
 /git branch feature/login
 ```
 
-- If the branch exists locally, pi checks it out.
-- If it does not exist, pi asks for confirmation and then creates it from the current branch (`git checkout -b`).
+1. If the branch exists locally, pi switches to it (`git switch`).
+2. If it exists only on a remote, pi creates a local branch that tracks it (`git switch --create <name> --track <remote>/<name>`). When several remotes have a branch with that name, pi asks which one to track.
+3. Otherwise pi asks for confirmation and creates it from the current branch (`git switch --create`).
+
+The name is validated with `git check-ref-format --branch` first, so invalid names (with spaces, starting with `-`, containing `..`, …) are rejected. Git shorthands such as `@{-1}` (the previously checked-out branch) work too.
 
 ### Autocomplete
 
 - Typing `/git ` suggests the available subcommands (`pull`, `branch`).
-- Typing `/git branch ` suggests local branches, annotated as *current branch*, *local only* or *present on remote*.
+- Typing `/git branch ` suggests local branches, annotated as *current branch*, *local only* or *present on remote*, followed by branches that exist only on a remote, annotated as *remote only (origin)*.
 
 ### Git-aware footer
 
@@ -122,10 +130,17 @@ In interactive (TUI) mode the footer shows:
 ↑12k ↓3.4k R45k W8k CH78.3% $0.123 21.4%/200k (auto)        (anthropic) claude-sonnet • medium
 ```
 
-- `↓N` — commits on the upstream that you have not pulled yet.
+- `↓N` — commits on the upstream that you have not pulled yet, **as of the last fetch**. The footer never fetches by itself, so new remote commits appear only after a fetch (for example via `/git pull`).
 - `↑N` — local commits that you have not pushed yet.
-- Counters refresh every 12 seconds and whenever the branch changes. Branches without an upstream show `↓0 ↑0`.
-- The second line keeps the usual pi stats: input/output tokens, cache reads/writes, cache hit rate, cost, context usage and the active model.
+- Counters refresh every 12 seconds, whenever the branch changes and right after `/git pull` or `/git branch`.
+- If the branch has no upstream configured, the counters compare against the branch with the same name on a remote (preferring `origin`). If no remote has it, the branch was never pushed: `↑N` counts the commits that are not on any remote and `↓` is always `0`. A detached HEAD, or a repository without remotes, shows no counters.
+- The second line keeps the usual pi stats: input/output tokens, cache reads/writes, cache hit rate, cost (with `(sub)` for subscription providers), context usage, `(auto)` when auto-compaction is enabled, and the active model.
+
+To keep the `/git` command but leave pi's built-in footer alone, set the `PI_GIT_FOOTER` environment variable to `off` (or `0`, `false`, `no`) before starting pi:
+
+```bash
+PI_GIT_FOOTER=off pi
+```
 
 ## Requirements
 
@@ -135,9 +150,11 @@ In interactive (TUI) mode the footer shows:
 
 ## Compatibility notes
 
-- The footer is replaced through `ctx.ui.setFooter()`. If you use another extension that also customizes the footer, the one that loads last wins.
+- The footer is replaced through `ctx.ui.setFooter()`. If you use another extension that also customizes the footer, the one that loads last wins. Use `PI_GIT_FOOTER=off` to opt out.
+- The extension API does not expose everything the built-in footer shows: the routed model of virtual models (`→ model`) and the experimental-features badge (`xp`) are not displayed.
 - Commands only work inside a git working tree; elsewhere `/git` reports an error and the footer is not replaced.
-- `/git pull` uses your git configuration (merge vs. rebase, credentials, etc.) as is.
+- `/git pull` uses your git configuration (merge vs. rebase, credentials, etc.) as is. If git needs to prompt for credentials in the terminal, the command cannot answer and fails after the timeout; use a credential helper.
+- Do not load the extension twice (for example from an npm install and from a local checkout in `~/.pi/agent/extensions/`): you would get two `/git` commands and two footers.
 
 ## Development
 
@@ -149,13 +166,20 @@ cd pi-git-commands
 pi -e ./extensions/index.ts
 ```
 
-Or install your local checkout as a package:
+Or install your local checkout as a package (from inside the cloned directory):
 
 ```bash
-pi install ./pi-git-commands
+pi install .
 ```
 
 Pi loads TypeScript extensions directly, so no build step is needed. After editing, run `/reload` inside pi to pick up changes.
+
+To typecheck the extension against the pi type definitions:
+
+```bash
+npm install
+npm run typecheck
+```
 
 ### Project structure
 
@@ -166,6 +190,7 @@ pi-git-commands/
 ├── extensions/
 │   └── index.ts      # Extension entry point
 ├── package.json      # npm metadata + pi manifest
+├── tsconfig.json     # Typecheck-only TypeScript config
 ├── CHANGELOG.md
 ├── LICENSE
 └── README.md
@@ -175,7 +200,7 @@ pi-git-commands/
 
 Releases are fully automated with GitHub Actions ([`.github/workflows/publish.yml`](.github/workflows/publish.yml)) using [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) — no npm tokens are stored in the repository, and every release ships with [provenance](https://docs.npmjs.com/generating-provenance-statements).
 
-1. Add a new `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md` and commit it.
+1. In `CHANGELOG.md`, rename the `## [Unreleased]` section to `## [x.y.z] - YYYY-MM-DD` (and update the links at the bottom), then commit it.
 2. Bump the version (this creates a commit and a `vx.y.z` tag):
 
    ```bash
@@ -188,7 +213,7 @@ Releases are fully automated with GitHub Actions ([`.github/workflows/publish.ym
    git push --follow-tags
    ```
 
-The workflow then checks that the tag is on `main` and matches `package.json`, publishes the package to npm and creates a GitHub Release with the matching changelog notes. Pi shows the new changelog entries to users after they update.
+The workflow then checks that the tag is on `main` and matches `package.json`, runs the typecheck, publishes the package to npm and creates a GitHub Release with the matching changelog notes. Pi shows the new changelog entries to users after they update.
 
 ## Contributing
 

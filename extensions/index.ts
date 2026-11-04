@@ -1,5 +1,12 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import type {
+	ContextUsage,
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
 
@@ -9,16 +16,28 @@ type BranchInfo = {
 	isLocalOnly: boolean;
 };
 
+type RemoteBranchInfo = {
+	name: string;
+	remotes: string[];
+};
+
+type BranchListing = {
+	locals: BranchInfo[];
+	/** Branches that exist on a remote but have no local counterpart. */
+	remoteOnly: RemoteBranchInfo[];
+};
+
 type GitExecResult = {
 	code: number;
 	stdout: string;
 	stderr: string;
+	killed: boolean;
 };
 
 type AheadBehind = {
 	incoming: number;
 	outgoing: number;
-	hasUpstream: boolean;
+	available: boolean;
 };
 
 type UsageTotals = {
@@ -29,11 +48,41 @@ type UsageTotals = {
 	cost: number;
 };
 
-const GIT_TIMEOUT_MS = 20_000;
-const GIT_SYNC_REFRESH_MS = 12_000;
+type UsageLike = {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	cost?: { total?: number };
+};
 
-async function runGit(pi: ExtensionAPI, cwd: string, args: string[]): Promise<GitExecResult> {
-	return pi.exec("git", args, { cwd, timeout: GIT_TIMEOUT_MS });
+type SessionStats = {
+	key: string;
+	usageTotals: UsageTotals;
+	latestCacheHitRate?: number;
+	contextUsage?: ContextUsage;
+};
+
+const GIT_TIMEOUT_MS = 20_000;
+const GIT_NETWORK_TIMEOUT_MS = 120_000;
+const GIT_SYNC_REFRESH_MS = 12_000;
+const BRANCH_CACHE_MS = 2_000;
+const FOOTER_ENV_VAR = "PI_GIT_FOOTER";
+
+async function runGit(
+	pi: ExtensionAPI,
+	cwd: string,
+	args: string[],
+	timeout: number = GIT_TIMEOUT_MS,
+): Promise<GitExecResult> {
+	return pi.exec("git", args, { cwd, timeout });
+}
+
+function describeFailure(result: GitExecResult, timeout: number = GIT_TIMEOUT_MS): string {
+	if (result.killed) {
+		return `timed out after ${Math.round(timeout / 1000)}s`;
+	}
+	return result.stderr.trim() || `exit code ${result.code}`;
 }
 
 async function isGitRepository(pi: ExtensionAPI, cwd: string): Promise<boolean> {
@@ -50,82 +99,174 @@ async function getCurrentBranch(pi: ExtensionAPI, cwd: string): Promise<string |
 	return name || undefined;
 }
 
-async function getAheadBehind(pi: ExtensionAPI, cwd: string): Promise<AheadBehind> {
-	const upstreamResult = await runGit(pi, cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
-	if (upstreamResult.code !== 0) {
-		return { incoming: 0, outgoing: 0, hasUpstream: false };
-	}
-
-	const countResult = await runGit(pi, cwd, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"]);
-	if (countResult.code !== 0) {
-		return { incoming: 0, outgoing: 0, hasUpstream: false };
-	}
-
-	const parts = countResult.stdout.trim().split(/\s+/);
-	const incoming = Number(parts[0] ?? "0");
-	const outgoing = Number(parts[1] ?? "0");
-
-	return {
-		incoming: Number.isFinite(incoming) ? incoming : 0,
-		outgoing: Number.isFinite(outgoing) ? outgoing : 0,
-		hasUpstream: true,
-	};
+function parseCount(text: string | undefined): number {
+	const value = Number(text ?? "0");
+	return Number.isFinite(value) ? value : 0;
 }
 
-function remoteRefToBranchName(ref: string): string | undefined {
-	const slash = ref.indexOf("/");
-	if (slash <= 0 || slash === ref.length - 1) {
+async function countLeftRight(pi: ExtensionAPI, cwd: string, base: string): Promise<AheadBehind | undefined> {
+	const result = await runGit(pi, cwd, ["rev-list", "--left-right", "--count", `${base}...HEAD`]);
+	if (result.code !== 0) {
 		return undefined;
 	}
-	const branch = ref.slice(slash + 1);
+	const parts = result.stdout.trim().split(/\s+/);
+	return { incoming: parseCount(parts[0]), outgoing: parseCount(parts[1]), available: true };
+}
+
+/**
+ * Prefer the configured upstream. Without one, compare against a same-named branch on a
+ * remote; if there is none, the branch was never pushed, so every commit that is not on
+ * any remote is outgoing and nothing can be incoming.
+ */
+async function getAheadBehind(pi: ExtensionAPI, cwd: string): Promise<AheadBehind> {
+	const unavailable: AheadBehind = { incoming: 0, outgoing: 0, available: false };
+
+	const fromUpstream = await countLeftRight(pi, cwd, "@{upstream}");
+	if (fromUpstream) {
+		return fromUpstream;
+	}
+
+	const branch = await getCurrentBranch(pi, cwd);
+	if (!branch) {
+		return unavailable;
+	}
+
+	const { remotes, byBranch } = await listRemoteBranches(pi, cwd);
+	if (remotes.length === 0) {
+		return unavailable;
+	}
+
+	const owners = byBranch.get(branch) ?? [];
+	if (owners.length > 0) {
+		const remote = owners.includes("origin") ? "origin" : owners[0];
+		return (await countLeftRight(pi, cwd, `refs/remotes/${remote}/${branch}`)) ?? unavailable;
+	}
+
+	const unpushed = await runGit(pi, cwd, ["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+	if (unpushed.code !== 0) {
+		return unavailable;
+	}
+	return { incoming: 0, outgoing: parseCount(unpushed.stdout.trim()), available: true };
+}
+
+async function getUpstream(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+	const result = await runGit(pi, cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+	return result.code === 0 ? result.stdout.trim() || undefined : undefined;
+}
+
+function splitLines(text: string): string[] {
+	return text
+		.split("\n")
+		.map((x) => x.trim())
+		.filter((x) => x.length > 0);
+}
+
+/**
+ * Split "origin/feature/x" into remote and branch, matching the longest known remote name
+ * so that remotes containing slashes are handled correctly.
+ */
+function splitRemoteRef(ref: string, remotes: string[]): { remote: string; branch: string } | undefined {
+	let best: string | undefined;
+	for (const remote of remotes) {
+		if (ref.startsWith(`${remote}/`) && (!best || remote.length > best.length)) {
+			best = remote;
+		}
+	}
+	if (!best) {
+		return undefined;
+	}
+	const branch = ref.slice(best.length + 1);
 	if (!branch || branch === "HEAD") {
 		return undefined;
 	}
-	return branch;
+	return { remote: best, branch };
 }
 
-async function listBranches(pi: ExtensionAPI, cwd: string): Promise<BranchInfo[]> {
-	const [localResult, remoteResult, currentResult] = await Promise.all([
+/** Map each branch name found under refs/remotes to the remotes that have it. */
+async function listRemoteBranches(
+	pi: ExtensionAPI,
+	cwd: string,
+): Promise<{ remotes: string[]; byBranch: Map<string, string[]> }> {
+	const [remoteRefsResult, remotesResult] = await Promise.all([
+		runGit(pi, cwd, ["for-each-ref", "refs/remotes", "--format=%(refname:lstrip=2)"]),
+		runGit(pi, cwd, ["remote"]),
+	]);
+
+	const remotes = remotesResult.code === 0 ? splitLines(remotesResult.stdout) : [];
+	const byBranch = new Map<string, string[]>();
+	if (remoteRefsResult.code === 0) {
+		for (const ref of splitLines(remoteRefsResult.stdout)) {
+			const parsed = splitRemoteRef(ref, remotes);
+			if (!parsed) {
+				continue;
+			}
+			const owners = byBranch.get(parsed.branch) ?? [];
+			owners.push(parsed.remote);
+			byBranch.set(parsed.branch, owners);
+		}
+	}
+	return { remotes, byBranch };
+}
+
+async function listBranches(pi: ExtensionAPI, cwd: string): Promise<BranchListing> {
+	const [localResult, { byBranch: remoteBranches }, currentResult] = await Promise.all([
 		runGit(pi, cwd, ["for-each-ref", "refs/heads", "--format=%(refname:short)"]),
-		runGit(pi, cwd, ["for-each-ref", "refs/remotes", "--format=%(refname:short)"]),
+		listRemoteBranches(pi, cwd),
 		runGit(pi, cwd, ["branch", "--show-current"]),
 	]);
 
 	if (localResult.code !== 0) {
-		return [];
+		return { locals: [], remoteOnly: [] };
 	}
 
-	const locals = localResult.stdout
-		.split("\n")
-		.map((x) => x.trim())
-		.filter((x) => x.length > 0);
-
-	const remoteBranches = new Set<string>();
-	if (remoteResult.code === 0) {
-		for (const line of remoteResult.stdout.split("\n")) {
-			const remoteRef = line.trim();
-			if (!remoteRef) {
-				continue;
-			}
-			const branchName = remoteRefToBranchName(remoteRef);
-			if (branchName) {
-				remoteBranches.add(branchName);
-			}
-		}
-	}
+	const locals = splitLines(localResult.stdout);
 
 	const currentBranch = currentResult.code === 0 ? currentResult.stdout.trim() : "";
+	const localSet = new Set(locals);
 
-	return locals.map((name) => ({
-		name,
-		isCurrent: name === currentBranch,
-		isLocalOnly: !remoteBranches.has(name),
-	}));
+	return {
+		locals: locals.map((name) => ({
+			name,
+			isCurrent: name === currentBranch,
+			isLocalOnly: !remoteBranches.has(name),
+		})),
+		remoteOnly: Array.from(remoteBranches.entries())
+			.filter(([name]) => !localSet.has(name))
+			.map(([name, owners]) => ({ name, remotes: owners }))
+			.sort((a, b) => a.name.localeCompare(b.name)),
+	};
 }
 
 async function localBranchExists(pi: ExtensionAPI, cwd: string, branchName: string): Promise<boolean> {
 	const result = await runGit(pi, cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`]);
 	return result.code === 0;
+}
+
+async function findRemotesWithBranch(pi: ExtensionAPI, cwd: string, branchName: string): Promise<string[]> {
+	const { byBranch } = await listRemoteBranches(pi, cwd);
+	return byBranch.get(branchName) ?? [];
+}
+
+/**
+ * Validate a user-supplied branch name. Returns the normalized name (git expands
+ * shorthands such as `@{-1}`) or an error message.
+ */
+async function validateBranchName(
+	pi: ExtensionAPI,
+	cwd: string,
+	input: string,
+): Promise<{ name: string } | { error: string }> {
+	if (/\s/.test(input)) {
+		return { error: `Invalid branch name '${input}': branch names cannot contain whitespace.` };
+	}
+	if (input.startsWith("-")) {
+		return { error: `Invalid branch name '${input}': branch names cannot start with '-'.` };
+	}
+	const result = await runGit(pi, cwd, ["check-ref-format", "--branch", input]);
+	if (result.code !== 0) {
+		return { error: `Invalid branch name '${input}'.` };
+	}
+	return { name: result.stdout.trim() || input };
 }
 
 function formatBranchList(branches: BranchInfo[]): string {
@@ -144,45 +285,59 @@ function formatBranchList(branches: BranchInfo[]): string {
 		.trimEnd();
 }
 
-function makeBranchItems(branches: BranchInfo[], query: string): AutocompleteItem[] {
+function makeBranchItems(listing: BranchListing, query: string): AutocompleteItem[] {
 	const q = query.trim().toLowerCase();
-	const filtered = q
-		? branches.filter((b) => b.name.toLowerCase().includes(q))
-		: branches;
+	const matches = (name: string) => !q || name.toLowerCase().includes(q);
 
-	return filtered.slice(0, 50).map((branch) => ({
-		value: branch.name,
-		label: `${branch.name}${branch.isLocalOnly ? "*" : ""}`,
-		description: branch.isCurrent
-			? "current branch"
-			: branch.isLocalOnly
-				? "local only"
-				: "present on remote",
-	}));
+	const localItems: AutocompleteItem[] = listing.locals
+		.filter((b) => matches(b.name))
+		.map((branch) => ({
+			value: branch.name,
+			label: `${branch.name}${branch.isLocalOnly ? "*" : ""}`,
+			description: branch.isCurrent
+				? "current branch"
+				: branch.isLocalOnly
+					? "local only"
+					: "present on remote",
+		}));
+
+	const remoteItems: AutocompleteItem[] = listing.remoteOnly
+		.filter((b) => matches(b.name))
+		.map((branch) => ({
+			value: branch.name,
+			label: branch.name,
+			description: `remote only (${branch.remotes.join(", ")})`,
+		}));
+
+	return [...localItems, ...remoteItems].slice(0, 50);
+}
+
+function isGitCommandInput(text: string): boolean {
+	return /^\/git(?:\s|$)/.test(text);
 }
 
 function createGitAutocompleteProvider(
 	current: AutocompleteProvider,
-	getBranches: () => Promise<BranchInfo[]>,
+	getBranches: () => Promise<BranchListing>,
 ): AutocompleteProvider {
 	return {
 		async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
 			const line = lines[cursorLine] ?? "";
 			const textBeforeCursor = line.slice(0, cursorCol);
 
-			if (!textBeforeCursor.startsWith("/git")) {
+			if (!isGitCommandInput(textBeforeCursor)) {
 				return current.getSuggestions(lines, cursorLine, cursorCol, options);
 			}
 
-			const branchMatch = textBeforeCursor.match(/^\/git\s+branch(?:\s+([^\s]*))?$/);
+			const branchMatch = textBeforeCursor.match(/^\/git\s+branch\s+(\S*)$/);
 			if (branchMatch) {
 				const token = branchMatch[1] ?? "";
-				const branches = await getBranches();
-				if (options.signal.aborted || branches.length === 0) {
+				const listing = await getBranches();
+				if (options.signal.aborted) {
 					return current.getSuggestions(lines, cursorLine, cursorCol, options);
 				}
 
-				const items = makeBranchItems(branches, token);
+				const items = makeBranchItems(listing, token);
 				if (items.length === 0) {
 					return current.getSuggestions(lines, cursorLine, cursorCol, options);
 				}
@@ -193,15 +348,16 @@ function createGitAutocompleteProvider(
 				};
 			}
 
-			const subcommandMatch = textBeforeCursor.match(/^\/git\s+([^\s]*)$/);
+			const subcommandMatch = textBeforeCursor.match(/^\/git\s+(\S*)$/);
 			if (subcommandMatch) {
 				const token = subcommandMatch[1] ?? "";
 				const values: AutocompleteItem[] = [
-					{ value: "pull", label: "pull", description: "Run fetch + pull" },
-					{ value: "branch ", label: "branch", description: "Switch/create local branch" },
+					{ value: "pull", label: "pull", description: "Run git pull --prune" },
+					// Trailing space: completing it leads straight into branch-name suggestions.
+					{ value: "branch ", label: "branch", description: "List, switch or create branches" },
 				];
 
-				const items = values.filter((x) => x.value.startsWith(token) || x.label.startsWith(token));
+				const items = values.filter((x) => x.value.startsWith(token));
 				if (items.length === 0) {
 					return current.getSuggestions(lines, cursorLine, cursorCol, options);
 				}
@@ -222,7 +378,7 @@ function createGitAutocompleteProvider(
 		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
 			const line = lines[cursorLine] ?? "";
 			const textBeforeCursor = line.slice(0, cursorCol);
-			if (textBeforeCursor.startsWith("/git")) {
+			if (isGitCommandInput(textBeforeCursor)) {
 				return false;
 			}
 			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
@@ -280,7 +436,7 @@ function createUsageTotals(): UsageTotals {
 	};
 }
 
-function addUsage(totals: UsageTotals, usage: any): void {
+function addUsage(totals: UsageTotals, usage: UsageLike | undefined): void {
 	if (!usage) {
 		return;
 	}
@@ -291,57 +447,191 @@ function addUsage(totals: UsageTotals, usage: any): void {
 	totals.cost += Number(usage.cost?.total ?? 0);
 }
 
-function getUsageTotalsAndCacheHit(ctx: ExtensionContext): { usageTotals: UsageTotals; latestCacheHitRate?: number } {
+function computeUsageTotals(entries: SessionEntry[]): { usageTotals: UsageTotals; latestCacheHitRate?: number } {
 	const usageTotals = createUsageTotals();
 	let latestCacheHitRate: number | undefined;
 
-	for (const entry of ctx.sessionManager.getEntries()) {
+	for (const entry of entries) {
 		if (entry.type === "usage") {
-			addUsage(usageTotals, (entry as any).usage);
+			addUsage(usageTotals, entry.usage);
 			continue;
 		}
 
 		if (entry.type === "message") {
-			const message = (entry as any).message;
-			if (message?.role === "assistant" && message.usage) {
+			const message = entry.message as { role?: string; usage?: UsageLike };
+			if (message.role === "assistant" && message.usage) {
 				addUsage(usageTotals, message.usage);
+				const cacheRead = Number(message.usage.cacheRead ?? 0);
 				const latestPromptTokens =
-					Number(message.usage.input ?? 0) + Number(message.usage.cacheRead ?? 0) + Number(message.usage.cacheWrite ?? 0);
-				latestCacheHitRate = latestPromptTokens > 0 ? (Number(message.usage.cacheRead ?? 0) / latestPromptTokens) * 100 : undefined;
+					Number(message.usage.input ?? 0) + cacheRead + Number(message.usage.cacheWrite ?? 0);
+				latestCacheHitRate = latestPromptTokens > 0 ? (cacheRead / latestPromptTokens) * 100 : undefined;
 				continue;
 			}
 
-			if (message?.role === "toolResult" && message.usage) {
+			if (message.role === "toolResult" && message.usage) {
 				addUsage(usageTotals, message.usage);
 			}
 			continue;
 		}
 
-		if ((entry.type === "branch_summary" || entry.type === "compaction") && (entry as any).usage) {
-			addUsage(usageTotals, (entry as any).usage);
+		if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
+			addUsage(usageTotals, entry.usage);
 		}
 	}
 
 	return { usageTotals, latestCacheHitRate };
 }
 
-async function handleGitPull(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const fetchResult = await runGit(pi, ctx.cwd, ["fetch", "--prune"]);
+/**
+ * Usage totals scan the whole session, and the footer renders on every frame. Entries are
+ * append-only and every append moves the leaf, so the stats only change with the session,
+ * the leaf or the model whose context window applies.
+ */
+function createSessionStatsReader(ctx: ExtensionContext): () => SessionStats {
+	let cached: SessionStats | undefined;
+	return () => {
+		const model = ctx.model;
+		const key = [
+			ctx.sessionManager.getSessionId(),
+			ctx.sessionManager.getLeafId() ?? "",
+			model ? `${model.provider}/${model.id}` : "",
+		].join("\u0000");
+		if (cached && cached.key === key) {
+			return cached;
+		}
+		const { usageTotals, latestCacheHitRate } = computeUsageTotals(ctx.sessionManager.getEntries());
+		cached = { key, usageTotals, latestCacheHitRate, contextUsage: ctx.getContextUsage() };
+		return cached;
+	};
+}
+
+function readAutoCompactEnabled(ctx: ExtensionContext): boolean {
+	try {
+		return SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() }).getCompactionEnabled();
+	} catch {
+		return true;
+	}
+}
+
+function isUsingSubscription(ctx: ExtensionContext): boolean {
+	const model = ctx.model;
+	if (!model) {
+		return false;
+	}
+	// Kimi Coding is subscription-backed despite using API-key authentication.
+	if (model.provider === "kimi-coding") {
+		return true;
+	}
+	try {
+		return (
+			ctx.modelRegistry.isUsingOAuth(model) &&
+			ctx.modelRegistry.getProvider(model.provider)?.auth.oauth?.isSubscription === true
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isFooterDisabled(): boolean {
+	const value = process.env[FOOTER_ENV_VAR]?.trim().toLowerCase();
+	return value === "0" || value === "off" || value === "false" || value === "no";
+}
+
+function summarizePullOutput(stdout: string): string {
+	const lines = splitLines(stdout);
+	if (lines.length === 0) {
+		return "Update completed.";
+	}
+	if (lines.length <= 3) {
+		return lines.join(" ");
+	}
+	return `${lines[0]} … ${lines[lines.length - 1]}`;
+}
+
+/**
+ * Make sure the current branch has an upstream before pulling. If it has none but a
+ * same-named branch exists on a remote, offer to track it. Returns false when the pull
+ * should not run.
+ */
+async function ensureUpstream(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
+	if (await getUpstream(pi, ctx.cwd)) {
+		return true;
+	}
+
+	const branch = await getCurrentBranch(pi, ctx.cwd);
+	if (!branch) {
+		ctx.ui.notify("git pull is not possible on a detached HEAD. Switch to a branch first.", "warning");
+		return false;
+	}
+
+	// Refresh remote-tracking branches so a branch pushed from elsewhere is found.
+	const fetchResult = await runGit(pi, ctx.cwd, ["fetch", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (fetchResult.code !== 0) {
-		const details = fetchResult.stderr.trim() || `exit code ${fetchResult.code}`;
-		ctx.ui.notify(`git fetch failed: ${details}`, "error");
+		ctx.ui.notify(`git fetch failed: ${describeFailure(fetchResult, GIT_NETWORK_TIMEOUT_MS)}`, "error");
+		return false;
+	}
+
+	const remotes = await findRemotesWithBranch(pi, ctx.cwd, branch);
+	if (remotes.length === 0) {
+		ctx.ui.notify(
+			`Branch '${branch}' has no upstream and does not exist on any remote, so there is nothing to pull. ` +
+				`Push it first, e.g. git push -u origin ${branch}`,
+			"warning",
+		);
+		return false;
+	}
+
+	const remote = await pickRemote(ctx, branch, remotes);
+	if (!remote) {
+		ctx.ui.notify("Operation cancelled.", "info");
+		return false;
+	}
+
+	const upstream = `${remote}/${branch}`;
+	const confirm = await ctx.ui.confirm(
+		"No upstream branch",
+		`Branch '${branch}' has no upstream. Set it to '${upstream}' and pull?`,
+	);
+	if (!confirm) {
+		ctx.ui.notify("Operation cancelled.", "info");
+		return false;
+	}
+
+	const setResult = await runGit(pi, ctx.cwd, ["branch", `--set-upstream-to=${upstream}`]);
+	if (setResult.code !== 0) {
+		ctx.ui.notify(`Setting upstream failed: ${describeFailure(setResult)}`, "error");
+		return false;
+	}
+	return true;
+}
+
+async function handleGitPull(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+	if (!(await ensureUpstream(pi, ctx))) {
 		return;
 	}
 
-	const pullResult = await runGit(pi, ctx.cwd, ["pull"]);
+	const pullResult = await runGit(pi, ctx.cwd, ["pull", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (pullResult.code !== 0) {
-		const details = pullResult.stderr.trim() || `exit code ${pullResult.code}`;
-		ctx.ui.notify(`git pull failed: ${details}`, "error");
+		// Drop the fetch progress ("From <url>", "a..b main -> origin/main") that precedes the actual error.
+		const stderr = pullResult.stderr
+			.split("\n")
+			.filter((x) => !/^From\s/.test(x) && !/->/.test(x))
+			.join("\n");
+		ctx.ui.notify(
+			`git pull failed: ${describeFailure({ ...pullResult, stderr }, GIT_NETWORK_TIMEOUT_MS)}`,
+			"error",
+		);
 		return;
 	}
 
-	const summary = pullResult.stdout.trim() || "Update completed.";
-	ctx.ui.notify(`fetch + pull completed. ${summary}`, "info");
+	ctx.ui.notify(`git pull completed. ${summarizePullOutput(pullResult.stdout)}`, "info");
+}
+
+async function pickRemote(ctx: ExtensionCommandContext, branchName: string, remotes: string[]): Promise<string | undefined> {
+	if (remotes.length === 1) {
+		return remotes[0];
+	}
+	return ctx.ui.select(`Branch '${branchName}' exists on several remotes. Track which one?`, remotes);
 }
 
 async function handleBranchSwitchOrCreate(
@@ -349,33 +639,46 @@ async function handleBranchSwitchOrCreate(
 	ctx: ExtensionCommandContext,
 	branchName: string,
 ): Promise<void> {
-	const exists = await localBranchExists(pi, ctx.cwd, branchName);
-
-	if (exists) {
-		const checkoutResult = await runGit(pi, ctx.cwd, ["checkout", branchName]);
-		if (checkoutResult.code !== 0) {
-			const details = checkoutResult.stderr.trim() || `exit code ${checkoutResult.code}`;
-			ctx.ui.notify(`Checkout failed: ${details}`, "error");
+	if (await localBranchExists(pi, ctx.cwd, branchName)) {
+		const switchResult = await runGit(pi, ctx.cwd, ["switch", branchName]);
+		if (switchResult.code !== 0) {
+			ctx.ui.notify(`Switch failed: ${describeFailure(switchResult)}`, "error");
 			return;
 		}
 		ctx.ui.notify(`Switched to branch '${branchName}'.`, "info");
 		return;
 	}
 
+	const remotes = await findRemotesWithBranch(pi, ctx.cwd, branchName);
+	if (remotes.length > 0) {
+		const remote = await pickRemote(ctx, branchName, remotes);
+		if (!remote) {
+			ctx.ui.notify("Operation cancelled.", "info");
+			return;
+		}
+		const upstream = `${remote}/${branchName}`;
+		const trackResult = await runGit(pi, ctx.cwd, ["switch", "--create", branchName, "--track", upstream]);
+		if (trackResult.code !== 0) {
+			ctx.ui.notify(`Switch failed: ${describeFailure(trackResult)}`, "error");
+			return;
+		}
+		ctx.ui.notify(`Created branch '${branchName}' tracking '${upstream}' and switched to it.`, "info");
+		return;
+	}
+
 	const currentBranch = (await getCurrentBranch(pi, ctx.cwd)) ?? "(detached HEAD)";
 	const confirm = await ctx.ui.confirm(
 		"Branch not found",
-		`Branch '${branchName}' does not exist locally. Create it from '${currentBranch}'?`,
+		`Branch '${branchName}' does not exist locally or on any remote. Create it from '${currentBranch}'?`,
 	);
 	if (!confirm) {
 		ctx.ui.notify("Operation cancelled.", "info");
 		return;
 	}
 
-	const createResult = await runGit(pi, ctx.cwd, ["checkout", "-b", branchName]);
+	const createResult = await runGit(pi, ctx.cwd, ["switch", "--create", branchName]);
 	if (createResult.code !== 0) {
-		const details = createResult.stderr.trim() || `exit code ${createResult.code}`;
-		ctx.ui.notify(`Branch creation failed: ${details}`, "error");
+		ctx.ui.notify(`Branch creation failed: ${describeFailure(createResult)}`, "error");
 		return;
 	}
 
@@ -383,173 +686,192 @@ async function handleBranchSwitchOrCreate(
 }
 
 async function handleGitBranch(pi: ExtensionAPI, ctx: ExtensionCommandContext, branchArg: string): Promise<void> {
-	const branchName = branchArg.trim();
+	const input = branchArg.trim();
 
-	if (!branchName) {
-		const branches = await listBranches(pi, ctx.cwd);
-		ctx.ui.notify(formatBranchList(branches), "info");
+	if (!input) {
+		const listing = await listBranches(pi, ctx.cwd);
+		ctx.ui.notify(formatBranchList(listing.locals), "info");
 		return;
 	}
 
-	await handleBranchSwitchOrCreate(pi, ctx, branchName);
+	const validated = await validateBranchName(pi, ctx.cwd, input);
+	if ("error" in validated) {
+		ctx.ui.notify(validated.error, "error");
+		return;
+	}
+
+	await handleBranchSwitchOrCreate(pi, ctx, validated.name);
 }
 
 export default function (pi: ExtensionAPI): void {
+	/** Set by the footer while it is mounted, so commands can refresh the counters right away. */
+	let requestSyncRefresh: (() => void) | undefined;
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (!(await isGitRepository(pi, ctx.cwd))) {
 			return;
 		}
 
-		let cache: { at: number; branches: BranchInfo[] } | undefined;
-		const getBranches = async (): Promise<BranchInfo[]> => {
+		let cache: { at: number; listing: BranchListing } | undefined;
+		const getBranches = async (): Promise<BranchListing> => {
 			const now = Date.now();
-			if (cache && now - cache.at < 2_000) {
-				return cache.branches;
+			if (cache && now - cache.at < BRANCH_CACHE_MS) {
+				return cache.listing;
 			}
-			const branches = await listBranches(pi, ctx.cwd);
-			cache = { at: now, branches };
-			return branches;
+			const listing = await listBranches(pi, ctx.cwd);
+			cache = { at: now, listing };
+			return listing;
 		};
 
 		ctx.ui.addAutocompleteProvider((current) => createGitAutocompleteProvider(current, getBranches));
 
-		if (ctx.mode === "tui") {
-			ctx.ui.setFooter((tui, theme, footerData) => {
-				let disposed = false;
-				let sync: AheadBehind = { incoming: 0, outgoing: 0, hasUpstream: false };
-
-				const refresh = async (): Promise<void> => {
-					const next = await getAheadBehind(pi, ctx.cwd);
-					if (disposed) {
-						return;
-					}
-					sync = next;
-					tui.requestRender();
-				};
-
-				void refresh();
-				const timer = setInterval(() => {
-					void refresh();
-				}, GIT_SYNC_REFRESH_MS);
-				const unsubBranch = footerData.onBranchChange(() => {
-					void refresh();
-				});
-
-				return {
-					dispose() {
-						disposed = true;
-						clearInterval(timer);
-						unsubBranch();
-					},
-					invalidate() {},
-					render(width: number): string[] {
-						const contextUsage = ctx.getContextUsage();
-						const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-						const contextPercentValue = contextUsage?.percent ?? 0;
-						const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
-
-						let pwd = formatCwdForFooter(ctx.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
-						const branch = footerData.getGitBranch();
-						if (branch) {
-							const statusPart = sync.hasUpstream ? ` ↓${sync.incoming} ↑${sync.outgoing}` : " ↓0 ↑0";
-							pwd = `${pwd} (${branch}${statusPart})`;
-						}
-
-						const sessionName = ctx.sessionManager.getSessionName();
-						if (sessionName) {
-							pwd = `${pwd} • ${sessionName}`;
-						}
-
-						const { usageTotals, latestCacheHitRate } = getUsageTotalsAndCacheHit(ctx);
-						const statsParts: string[] = [];
-						if (usageTotals.input) statsParts.push(`↑${formatTokens(usageTotals.input)}`);
-						if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
-						if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
-						if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-						if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
-							statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-						}
-						if (usageTotals.cost) {
-							statsParts.push(`$${usageTotals.cost.toFixed(3)}`);
-						}
-
-						const autoIndicator = " (auto)";
-						const contextPercentDisplay =
-							contextPercent === "?"
-								? `?/${formatTokens(contextWindow)}${autoIndicator}`
-								: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-
-						let contextPercentStr = contextPercentDisplay;
-						if (contextPercentValue > 90) {
-							contextPercentStr = theme.fg("error", contextPercentDisplay);
-						} else if (contextPercentValue > 70) {
-							contextPercentStr = theme.fg("warning", contextPercentDisplay);
-						}
-						statsParts.push(contextPercentStr);
-
-						let statsLeft = statsParts.join(" ");
-						let statsLeftWidth = visibleWidth(statsLeft);
-						if (statsLeftWidth > width) {
-							statsLeft = truncateToWidth(statsLeft, width, "...");
-							statsLeftWidth = visibleWidth(statsLeft);
-						}
-
-						const modelName = ctx.model?.id || "no-model";
-						let rightSideWithoutProvider = modelName;
-						if ((ctx.model as any)?.reasoning) {
-							const thinkingLevel = ctx.thinkingLevel || "off";
-							rightSideWithoutProvider =
-								thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
-						}
-
-						let rightSide = rightSideWithoutProvider;
-						if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
-							rightSide = `(${ctx.model.provider}) ${rightSideWithoutProvider}`;
-							if (statsLeftWidth + 2 + visibleWidth(rightSide) > width) {
-								rightSide = rightSideWithoutProvider;
-							}
-						}
-
-						const rightSideWidth = visibleWidth(rightSide);
-						const minPadding = 2;
-						const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
-						let statsLine: string;
-
-						if (totalNeeded <= width) {
-							const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-							statsLine = statsLeft + padding + rightSide;
-						} else {
-							const availableForRight = width - statsLeftWidth - minPadding;
-							if (availableForRight > 0) {
-								const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-								const truncatedRightWidth = visibleWidth(truncatedRight);
-								const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-								statsLine = statsLeft + padding + truncatedRight;
-							} else {
-								statsLine = statsLeft;
-							}
-						}
-
-						const dimStatsLeft = theme.fg("dim", statsLeft);
-						const remainder = statsLine.slice(statsLeft.length);
-						const dimRemainder = theme.fg("dim", remainder);
-						const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-
-						const lines = [pwdLine, dimStatsLeft + dimRemainder];
-						const extensionStatuses = footerData.getExtensionStatuses();
-						if (extensionStatuses.size > 0) {
-							const sortedStatuses = Array.from(extensionStatuses.entries())
-								.sort(([a], [b]) => a.localeCompare(b))
-								.map(([, text]) => sanitizeStatusText(text));
-							const statusLine = sortedStatuses.join(" ");
-							lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
-						}
-
-						return lines;
-					},
-				};
-			});
+		if (ctx.mode !== "tui" || isFooterDisabled()) {
+			return;
 		}
+
+		ctx.ui.setFooter((tui, theme, footerData) => {
+			let disposed = false;
+			let sync: AheadBehind = { incoming: 0, outgoing: 0, available: false };
+			let autoCompactEnabled = readAutoCompactEnabled(ctx);
+			const getSessionStats = createSessionStatsReader(ctx);
+
+			const refresh = async (): Promise<void> => {
+				const next = await getAheadBehind(pi, ctx.cwd);
+				if (disposed) {
+					return;
+				}
+				sync = next;
+				autoCompactEnabled = readAutoCompactEnabled(ctx);
+				tui.requestRender();
+			};
+
+			void refresh();
+			const timer = setInterval(() => {
+				void refresh();
+			}, GIT_SYNC_REFRESH_MS);
+			const unsubBranch = footerData.onBranchChange(() => {
+				void refresh();
+			});
+			requestSyncRefresh = () => {
+				void refresh();
+			};
+
+			return {
+				dispose() {
+					disposed = true;
+					clearInterval(timer);
+					unsubBranch();
+					requestSyncRefresh = undefined;
+				},
+				invalidate() {},
+				render(width: number): string[] {
+					const { usageTotals, latestCacheHitRate, contextUsage } = getSessionStats();
+					const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+					const contextPercentValue = contextUsage?.percent ?? 0;
+					const contextPercent =
+						contextUsage && contextUsage.percent !== null ? contextPercentValue.toFixed(1) : "?";
+
+					let pwd = formatCwdForFooter(ctx.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+					const branch = footerData.getGitBranch();
+					if (branch) {
+						const statusPart = sync.available ? ` ↓${sync.incoming} ↑${sync.outgoing}` : "";
+						pwd = `${pwd} (${branch}${statusPart})`;
+					}
+
+					const sessionName = ctx.sessionManager.getSessionName();
+					if (sessionName) {
+						pwd = `${pwd} • ${sessionName}`;
+					}
+
+					const statsParts: string[] = [];
+					if (usageTotals.input) statsParts.push(`↑${formatTokens(usageTotals.input)}`);
+					if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
+					if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
+					if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
+					if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+					}
+					const usingSubscription = isUsingSubscription(ctx);
+					if (usageTotals.cost || usingSubscription) {
+						statsParts.push(`$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+					}
+
+					const autoIndicator = autoCompactEnabled ? " (auto)" : "";
+					const contextPercentDisplay =
+						contextPercent === "?"
+							? `?/${formatTokens(contextWindow)}${autoIndicator}`
+							: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+
+					let contextPercentStr = contextPercentDisplay;
+					if (contextPercentValue > 90) {
+						contextPercentStr = theme.fg("error", contextPercentDisplay);
+					} else if (contextPercentValue > 70) {
+						contextPercentStr = theme.fg("warning", contextPercentDisplay);
+					}
+					statsParts.push(contextPercentStr);
+
+					let statsLeft = statsParts.join(" ");
+					let statsLeftWidth = visibleWidth(statsLeft);
+					if (statsLeftWidth > width) {
+						statsLeft = truncateToWidth(statsLeft, width, "...");
+						statsLeftWidth = visibleWidth(statsLeft);
+					}
+
+					const modelName = ctx.model?.id || "no-model";
+					let rightSideWithoutProvider = modelName;
+					if (ctx.model?.reasoning) {
+						const thinkingLevel = ctx.thinkingLevel || "off";
+						rightSideWithoutProvider =
+							thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
+					}
+
+					let rightSide = rightSideWithoutProvider;
+					if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
+						rightSide = `(${ctx.model.provider}) ${rightSideWithoutProvider}`;
+						if (statsLeftWidth + 2 + visibleWidth(rightSide) > width) {
+							rightSide = rightSideWithoutProvider;
+						}
+					}
+
+					const rightSideWidth = visibleWidth(rightSide);
+					const minPadding = 2;
+					const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+					let statsLine: string;
+
+					if (totalNeeded <= width) {
+						const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+						statsLine = statsLeft + padding + rightSide;
+					} else {
+						const availableForRight = width - statsLeftWidth - minPadding;
+						if (availableForRight > 0) {
+							const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+							const truncatedRightWidth = visibleWidth(truncatedRight);
+							const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
+							statsLine = statsLeft + padding + truncatedRight;
+						} else {
+							statsLine = statsLeft;
+						}
+					}
+
+					const dimStatsLeft = theme.fg("dim", statsLeft);
+					const remainder = statsLine.slice(statsLeft.length);
+					const dimRemainder = theme.fg("dim", remainder);
+					const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+
+					const lines = [pwdLine, dimStatsLeft + dimRemainder];
+					const extensionStatuses = footerData.getExtensionStatuses();
+					if (extensionStatuses.size > 0) {
+						const sortedStatuses = Array.from(extensionStatuses.entries())
+							.sort(([a], [b]) => a.localeCompare(b))
+							.map(([, text]) => sanitizeStatusText(text));
+						const statusLine = sortedStatuses.join(" ");
+						lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+					}
+
+					return lines;
+				},
+			};
+		});
 	});
 
 	pi.registerCommand("git", {
@@ -568,12 +890,14 @@ export default function (pi: ExtensionAPI): void {
 
 			if (trimmed === "pull") {
 				await handleGitPull(pi, ctx);
+				requestSyncRefresh?.();
 				return;
 			}
 
 			const branchMatch = trimmed.match(/^branch(?:\s+(.*))?$/);
 			if (branchMatch) {
 				await handleGitBranch(pi, ctx, branchMatch[1] ?? "");
+				requestSyncRefresh?.();
 				return;
 			}
 
