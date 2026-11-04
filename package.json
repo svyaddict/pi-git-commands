@@ -1,6 +1,6 @@
 {
 	"name": "@svyaddict/pi-git-commands",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Pi package that adds /git status, fetch, pull, push, branch and cleanup commands, branch autocomplete and a git-aware footer with ahead/behind counters",
 	"type": "module",
 	"keywords": [
