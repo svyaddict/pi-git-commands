@@ -14,7 +14,7 @@ Thanks for helping improve pi-git-commands! 🎉
 
 1. Fork the repository and create a branch: `git switch -c feat/my-feature`.
 2. Make your change. [docs/development.md](docs/development.md) explains the project layout, how to load your checkout into pi and how to add a command.
-3. Run `npm run typecheck`.
+3. Add or update tests, then run `npm run check` (lint, typecheck and tests; `npm run format` fixes formatting).
 4. Update the docs: the README command table and [docs/commands.md](docs/commands.md) if behavior changes, plus an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
 5. Commit using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, …) and open a pull request.
 

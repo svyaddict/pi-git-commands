@@ -1,15 +1,16 @@
 # Commands
 
-All commands are subcommands of `/git` and work only inside a git working tree. Commands that talk to a remote (`fetch`, `pull`, `push`, `cleanup`) time out after 120 seconds; the others after 20 seconds. After every command the [footer](footer.md) counters refresh right away.
+All commands are subcommands of `/git`. They work only inside a git working tree, except [`/git footer`](#git-footer). Commands that talk to a remote (`fetch`, `pull`, `push`, `cleanup`) time out after 120 seconds; the others after 20 seconds. git never prompts for credentials: if they are missing, the command fails right away. When the [footer](footer.md) is enabled, its counters refresh right after every command.
 
 | Command | What it does |
 |---|---|
 | [`/git status`](#git-status) | Summary of conflicts, staged, unstaged and untracked files |
 | [`/git fetch`](#git-fetch) | Fetch all remotes, prune stale branches, report incoming commits |
-| [`/git pull`](#git-pull) | Pull the current branch, setting its upstream if needed |
+| [`/git pull`](#git-pull) | Fast-forward the current branch, setting its upstream if needed |
 | [`/git push`](#git-push) | Push the current branch, setting its upstream if needed |
 | [`/git branch [name]`](#git-branch) | List branches, or switch to / check out / create one |
 | [`/git cleanup`](#git-cleanup) | Delete merged branches and branches whose upstream is gone |
+| [`/git footer [on\|off]`](#git-footer) | Show or change whether the git footer is used, in every session |
 
 Running `/git` with no subcommand shows the usage line. Subcommands that take no argument reject one (`/git pull origin` is an error, not a silent `/git pull`).
 
@@ -21,6 +22,7 @@ Running `/git` with no subcommand shows the usage line. Subcommands that take no
 - [`/git push`](#git-push)
 - [`/git branch`](#git-branch)
 - [`/git cleanup`](#git-cleanup)
+- [`/git footer`](#git-footer)
 - [Autocomplete](#autocomplete)
 
 ## `/git status`
@@ -70,7 +72,9 @@ Use it to refresh the footer's `↓` counter without changing your working tree.
 /git pull
 ```
 
-Pulls the current branch and prunes stale remote-tracking branches in one step. Merge or rebase follows your git configuration (`pull.rebase`, `branch.<name>.rebase`). The result is reported as a short notification.
+Pulls the current branch and prunes stale remote-tracking branches in one step (`git pull --ff-only --prune`). The result is reported as a short notification.
+
+**Fast-forward only.** pi never creates a merge commit or starts a rebase for you, whatever `pull.rebase` or `branch.<name>.rebase` say. If your branch and its upstream have diverged, pull stops without changing anything and tells you so; reconcile them yourself with `git pull --rebase` or `git pull --no-rebase`. This also means an interrupted pull cannot leave a half-finished merge behind.
 
 If the current branch has no upstream:
 
@@ -153,13 +157,17 @@ Local branches that can be deleted:
 Deletes local branches you no longer need. pi first fetches all remotes with pruning, so branches deleted on the remote are detected. If the fetch fails (for example offline), pi warns and continues with local data. It then offers:
 
 - branches whose **upstream was deleted** on the remote, typically after a PR is merged and its branch removed;
-- branches already **merged into the default branch**: `origin/HEAD`, otherwise `main` or `master`.
+- branches already **merged into the default branch** (`origin/HEAD`, otherwise `main` or `master`) that were pushed at some point.
 
-**Never offered**: the current branch, the default branch, and `main`, `master`, `develop`, `dev`.
+**Never offered**:
+
+- the current branch, the default branch, and `main`, `master`, `develop`, `dev`;
+- branches checked out in another worktree;
+- merged branches that were never pushed, or that point exactly at the default branch. git considers a branch just created from `main` as "merged", but it is much more likely to be work about to start. Delete those with `git branch -d` if you really want to.
 
 **Choosing**: with a single candidate pi asks for confirmation. With several, you can delete them all, choose one by one, or cancel.
 
-**Squash and rebase merges**: branches merged this way look unmerged to git, so a normal delete refuses them. pi lists them and asks before force-deleting them. If you decline, they are kept.
+**Squash and rebase merges**: branches merged this way look unmerged to git, so a normal delete refuses them. pi lists them and asks before force-deleting them, warning that a deleted upstream does not prove the work was merged. If you decline, they are kept.
 
 **Undo**: the summary shows the commit each deleted branch pointed to:
 
@@ -171,11 +179,25 @@ Deleted 2 branches:
 
 To restore one: `git branch feature/login 3325c16`.
 
+## `/git footer`
+
+```text
+/git footer
+/git footer off
+/git footer on
+```
+
+- Without an argument, shows whether the [git footer](footer.md) is on and where the setting is saved.
+- `off` restores pi's built-in footer; `on` (the default) brings the git footer back.
+
+The change applies right away and is saved in `~/.pi/agent/pi-git-commands.json`, so every pi session in every terminal follows it; pi windows already open pick it up after `/reload`. It works anywhere, also outside git repositories. See [Turning it on or off](footer.md#turning-it-on-or-off).
+
 ## Autocomplete
 
 - Typing `/git ` suggests the subcommands with a short description.
 - Typing `/git branch ` suggests branches:
   - local branches, annotated as *current branch*, *local only* or *present on remote*;
   - then branches that exist only on a remote, annotated as *remote only (origin)*.
+- Typing `/git footer ` suggests `on` and `off`.
 
 Suggestions filter as you type, and selecting `branch` leads straight into branch suggestions.
