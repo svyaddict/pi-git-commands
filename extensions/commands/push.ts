@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { GitExecResult } from "../git.ts";
 import {
 	describeFailure,
@@ -10,7 +10,7 @@ import {
 } from "../git.ts";
 import { notifyCancelled, pickRemote } from "./shared.ts";
 
-function describePushFailure(result: GitExecResult): string {
+export function describePushFailure(result: GitExecResult): string {
 	if (!result.killed && /\[rejected\]/.test(result.stderr)) {
 		return "the remote has commits that you do not have locally. Run /git pull first, then push again.";
 	}
@@ -26,12 +26,8 @@ function describePushFailure(result: GitExecResult): string {
  * Choose where a branch without upstream should be pushed: a remote that already has a
  * same-named branch, otherwise any remote (origin first). Asks when there is a choice.
  */
-async function chooseTargetRemote(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	branch: string,
-): Promise<string | undefined | null> {
-	const { remotes, byBranch } = await listRemoteBranches(pi, ctx.cwd);
+async function chooseTargetRemote(ctx: ExtensionCommandContext, branch: string): Promise<string | undefined | null> {
+	const { remotes, byBranch } = await listRemoteBranches(ctx.cwd);
 	if (remotes.length === 0) {
 		return null;
 	}
@@ -41,14 +37,14 @@ async function chooseTargetRemote(
 	return pickRemote(ctx, `Push '${branch}' to which remote?`, ordered);
 }
 
-export async function handleGitPush(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const branch = await getCurrentBranch(pi, ctx.cwd);
+export async function handleGitPush(ctx: ExtensionCommandContext): Promise<void> {
+	const branch = await getCurrentBranch(ctx.cwd);
 	if (!branch) {
 		ctx.ui.notify("git push is not possible on a detached HEAD. Switch to a branch first.", "warning");
 		return;
 	}
 
-	const upstream = await getUpstream(pi, ctx.cwd);
+	const upstream = await getUpstream(ctx.cwd, branch);
 	let args: string[];
 	let target: string;
 
@@ -56,7 +52,7 @@ export async function handleGitPush(pi: ExtensionAPI, ctx: ExtensionCommandConte
 		args = ["push"];
 		target = upstream;
 	} else {
-		const remote = await chooseTargetRemote(pi, ctx, branch);
+		const remote = await chooseTargetRemote(ctx, branch);
 		if (remote === null) {
 			ctx.ui.notify("This repository has no remotes to push to. Add one with git remote add.", "warning");
 			return;
@@ -77,7 +73,7 @@ export async function handleGitPush(pi: ExtensionAPI, ctx: ExtensionCommandConte
 		args = ["push", "--set-upstream", remote, branch];
 	}
 
-	const pushResult = await runGit(pi, ctx.cwd, args, GIT_NETWORK_TIMEOUT_MS);
+	const pushResult = await runGit(ctx.cwd, args, GIT_NETWORK_TIMEOUT_MS);
 	if (pushResult.code !== 0) {
 		ctx.ui.notify(`git push failed: ${describePushFailure(pushResult)}`, "error");
 		return;

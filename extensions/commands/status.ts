@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AheadBehind } from "../git.ts";
 import { describeFailure, getAheadBehind, runGit } from "../git.ts";
 
@@ -30,7 +30,7 @@ function fieldsFrom(entry: string, count: number): string {
  * Parse `git status --porcelain=v2 --branch -z`. With -z paths are NUL-terminated and never
  * quoted; a rename entry is followed by an extra NUL-terminated field with the original path.
  */
-function parseStatus(output: string): WorkingTreeStatus {
+export function parseStatus(output: string): WorkingTreeStatus {
 	const status: WorkingTreeStatus = { staged: [], unstaged: [], untracked: [], conflicts: [] };
 	const entries = output.split("\0");
 
@@ -89,7 +89,7 @@ function formatHeader(status: WorkingTreeStatus, sync: AheadBehind): string {
 	return `On branch ${status.branch}${upstreamPart}${syncPart}`;
 }
 
-function formatStatus(status: WorkingTreeStatus, sync: AheadBehind): string {
+export function formatStatus(status: WorkingTreeStatus, sync: AheadBehind): string {
 	const withCode = (entries: StatusEntry[]) => entries.map((e) => `${e.code.padEnd(2)} ${e.path}`);
 	const sections = [
 		...formatSection("Conflicts", withCode(status.conflicts)),
@@ -101,10 +101,10 @@ function formatStatus(status: WorkingTreeStatus, sync: AheadBehind): string {
 	return [formatHeader(status, sync), ...body].join("\n");
 }
 
-export async function handleGitStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+export async function handleGitStatus(ctx: ExtensionCommandContext): Promise<void> {
 	const [statusResult, sync] = await Promise.all([
-		runGit(pi, ctx.cwd, ["status", "--porcelain=v2", "--branch", "-z"]),
-		getAheadBehind(pi, ctx.cwd),
+		runGit(ctx.cwd, ["status", "--porcelain=v2", "--branch", "-z"]),
+		getAheadBehind(ctx.cwd),
 	]);
 	if (statusResult.code !== 0) {
 		ctx.ui.notify(`git status failed: ${describeFailure(statusResult)}`, "error");

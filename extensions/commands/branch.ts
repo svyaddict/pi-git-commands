@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { BranchInfo } from "../git.ts";
 import {
 	describeFailure,
@@ -11,7 +11,7 @@ import {
 } from "../git.ts";
 import { notifyCancelled, pickRemote } from "./shared.ts";
 
-function formatBranchList(branches: BranchInfo[]): string {
+export function formatBranchList(branches: BranchInfo[]): string {
 	if (branches.length === 0) {
 		return "No local branches found.";
 	}
@@ -25,13 +25,9 @@ function formatBranchList(branches: BranchInfo[]): string {
 	return ["Local branches:", ...lines, "", "* = local-only branch (not present on any remote)"].join("\n").trimEnd();
 }
 
-async function handleBranchSwitchOrCreate(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	branchName: string,
-): Promise<void> {
-	if (await localBranchExists(pi, ctx.cwd, branchName)) {
-		const switchResult = await runGit(pi, ctx.cwd, ["switch", branchName]);
+async function handleBranchSwitchOrCreate(ctx: ExtensionCommandContext, branchName: string): Promise<void> {
+	if (await localBranchExists(ctx.cwd, branchName)) {
+		const switchResult = await runGit(ctx.cwd, ["switch", branchName]);
 		if (switchResult.code !== 0) {
 			ctx.ui.notify(`Switch failed: ${describeFailure(switchResult)}`, "error");
 			return;
@@ -40,7 +36,7 @@ async function handleBranchSwitchOrCreate(
 		return;
 	}
 
-	const remotes = await findRemotesWithBranch(pi, ctx.cwd, branchName);
+	const remotes = await findRemotesWithBranch(ctx.cwd, branchName);
 	if (remotes.length > 0) {
 		const remote = await pickRemote(ctx, `Branch '${branchName}' exists on several remotes. Track which one?`, remotes);
 		if (!remote) {
@@ -48,7 +44,7 @@ async function handleBranchSwitchOrCreate(
 			return;
 		}
 		const upstream = `${remote}/${branchName}`;
-		const trackResult = await runGit(pi, ctx.cwd, ["switch", "--create", branchName, "--track", upstream]);
+		const trackResult = await runGit(ctx.cwd, ["switch", "--create", branchName, "--track", upstream]);
 		if (trackResult.code !== 0) {
 			ctx.ui.notify(`Switch failed: ${describeFailure(trackResult)}`, "error");
 			return;
@@ -57,7 +53,7 @@ async function handleBranchSwitchOrCreate(
 		return;
 	}
 
-	const currentBranch = (await getCurrentBranch(pi, ctx.cwd)) ?? "(detached HEAD)";
+	const currentBranch = (await getCurrentBranch(ctx.cwd)) ?? "(detached HEAD)";
 	const confirm = await ctx.ui.confirm(
 		"Branch not found",
 		`Branch '${branchName}' does not exist locally or on any remote. Create it from '${currentBranch}'?`,
@@ -67,7 +63,7 @@ async function handleBranchSwitchOrCreate(
 		return;
 	}
 
-	const createResult = await runGit(pi, ctx.cwd, ["switch", "--create", branchName]);
+	const createResult = await runGit(ctx.cwd, ["switch", "--create", branchName]);
 	if (createResult.code !== 0) {
 		ctx.ui.notify(`Branch creation failed: ${describeFailure(createResult)}`, "error");
 		return;
@@ -76,24 +72,20 @@ async function handleBranchSwitchOrCreate(
 	ctx.ui.notify(`Created and switched to branch '${branchName}' from '${currentBranch}'.`, "info");
 }
 
-export async function handleGitBranch(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	branchArg: string,
-): Promise<void> {
+export async function handleGitBranch(ctx: ExtensionCommandContext, branchArg: string): Promise<void> {
 	const input = branchArg.trim();
 
 	if (!input) {
-		const listing = await listBranches(pi, ctx.cwd);
+		const listing = await listBranches(ctx.cwd);
 		ctx.ui.notify(formatBranchList(listing.locals), "info");
 		return;
 	}
 
-	const validated = await validateBranchName(pi, ctx.cwd, input);
+	const validated = await validateBranchName(ctx.cwd, input);
 	if ("error" in validated) {
 		ctx.ui.notify(validated.error, "error");
 		return;
 	}
 
-	await handleBranchSwitchOrCreate(pi, ctx, validated.name);
+	await handleBranchSwitchOrCreate(ctx, validated.name);
 }

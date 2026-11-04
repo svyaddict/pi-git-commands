@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { handleGitBranch } from "./branch.ts";
 import { handleGitCleanup } from "./cleanup.ts";
 import { handleGitFetch } from "./fetch.ts";
@@ -13,7 +13,7 @@ export type Subcommand = {
 	description: string;
 	/** Whether the subcommand accepts an argument; autocomplete then appends a space. */
 	takesArgument: boolean;
-	run(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: string): Promise<void>;
+	run(ctx: ExtensionCommandContext, args: string): Promise<void>;
 };
 
 export const SUBCOMMANDS: Subcommand[] = [
@@ -22,42 +22,42 @@ export const SUBCOMMANDS: Subcommand[] = [
 		usage: "status",
 		description: "Show staged, unstaged and untracked files",
 		takesArgument: false,
-		run: (pi, ctx) => handleGitStatus(pi, ctx),
+		run: (ctx) => handleGitStatus(ctx),
 	},
 	{
 		name: "fetch",
 		usage: "fetch",
 		description: "Run git fetch --all --prune",
 		takesArgument: false,
-		run: (pi, ctx) => handleGitFetch(pi, ctx),
+		run: (ctx) => handleGitFetch(ctx),
 	},
 	{
 		name: "pull",
 		usage: "pull",
 		description: "Run git pull --prune",
 		takesArgument: false,
-		run: (pi, ctx) => handleGitPull(pi, ctx),
+		run: (ctx) => handleGitPull(ctx),
 	},
 	{
 		name: "push",
 		usage: "push",
 		description: "Push the current branch, setting its upstream if needed",
 		takesArgument: false,
-		run: (pi, ctx) => handleGitPush(pi, ctx),
+		run: (ctx) => handleGitPush(ctx),
 	},
 	{
 		name: "branch",
 		usage: "branch [name]",
 		description: "List, switch or create branches",
 		takesArgument: true,
-		run: (pi, ctx, args) => handleGitBranch(pi, ctx, args),
+		run: (ctx, args) => handleGitBranch(ctx, args),
 	},
 	{
 		name: "cleanup",
 		usage: "cleanup",
 		description: "Delete merged branches and branches whose upstream is gone",
 		takesArgument: false,
-		run: (pi, ctx) => handleGitCleanup(pi, ctx),
+		run: (ctx) => handleGitCleanup(ctx),
 	},
 ];
 

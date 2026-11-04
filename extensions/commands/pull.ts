@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { GitExecResult } from "../git.ts";
 import {
 	describeFailure,
 	findRemotesWithBranch,
@@ -10,7 +11,7 @@ import {
 } from "../git.ts";
 import { notifyCancelled, pickRemote } from "./shared.ts";
 
-function summarizePullOutput(stdout: string): string {
+export function summarizePullOutput(stdout: string): string {
 	const lines = splitLines(stdout);
 	if (lines.length === 0) {
 		return "Update completed.";
@@ -26,25 +27,24 @@ function summarizePullOutput(stdout: string): string {
  * same-named branch exists on a remote, offer to track it. Returns false when the pull
  * should not run.
  */
-async function ensureUpstream(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
-	if (await getUpstream(pi, ctx.cwd)) {
-		return true;
-	}
-
-	const branch = await getCurrentBranch(pi, ctx.cwd);
+async function ensureUpstream(ctx: ExtensionCommandContext): Promise<boolean> {
+	const branch = await getCurrentBranch(ctx.cwd);
 	if (!branch) {
 		ctx.ui.notify("git pull is not possible on a detached HEAD. Switch to a branch first.", "warning");
 		return false;
 	}
+	if (await getUpstream(ctx.cwd, branch)) {
+		return true;
+	}
 
 	// Refresh remote-tracking branches so a branch pushed from elsewhere is found.
-	const fetchResult = await runGit(pi, ctx.cwd, ["fetch", "--prune"], GIT_NETWORK_TIMEOUT_MS);
+	const fetchResult = await runGit(ctx.cwd, ["fetch", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (fetchResult.code !== 0) {
 		ctx.ui.notify(`git fetch failed: ${describeFailure(fetchResult, GIT_NETWORK_TIMEOUT_MS)}`, "error");
 		return false;
 	}
 
-	const remotes = await findRemotesWithBranch(pi, ctx.cwd, branch);
+	const remotes = await findRemotesWithBranch(ctx.cwd, branch);
 	if (remotes.length === 0) {
 		ctx.ui.notify(
 			`Branch '${branch}' has no upstream and does not exist on any remote, so there is nothing to pull. ` +
@@ -70,7 +70,7 @@ async function ensureUpstream(pi: ExtensionAPI, ctx: ExtensionCommandContext): P
 		return false;
 	}
 
-	const setResult = await runGit(pi, ctx.cwd, ["branch", `--set-upstream-to=${upstream}`]);
+	const setResult = await runGit(ctx.cwd, ["branch", `--set-upstream-to=${upstream}`]);
 	if (setResult.code !== 0) {
 		ctx.ui.notify(`Setting upstream failed: ${describeFailure(setResult)}`, "error");
 		return false;
@@ -78,19 +78,23 @@ async function ensureUpstream(pi: ExtensionAPI, ctx: ExtensionCommandContext): P
 	return true;
 }
 
-export async function handleGitPull(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	if (!(await ensureUpstream(pi, ctx))) {
+export function describePullFailure(result: GitExecResult): string {
+	// Drop the fetch progress ("From <url>", "a..b main -> origin/main") that precedes the actual error.
+	const stderr = result.stderr
+		.split("\n")
+		.filter((x) => !/^From\s/.test(x) && !/->/.test(x) && !/^hint:/.test(x))
+		.join("\n");
+	return describeFailure({ ...result, stderr }, GIT_NETWORK_TIMEOUT_MS);
+}
+
+export async function handleGitPull(ctx: ExtensionCommandContext): Promise<void> {
+	if (!(await ensureUpstream(ctx))) {
 		return;
 	}
 
-	const pullResult = await runGit(pi, ctx.cwd, ["pull", "--prune"], GIT_NETWORK_TIMEOUT_MS);
+	const pullResult = await runGit(ctx.cwd, ["pull", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (pullResult.code !== 0) {
-		// Drop the fetch progress ("From <url>", "a..b main -> origin/main") that precedes the actual error.
-		const stderr = pullResult.stderr
-			.split("\n")
-			.filter((x) => !/^From\s/.test(x) && !/->/.test(x))
-			.join("\n");
-		ctx.ui.notify(`git pull failed: ${describeFailure({ ...pullResult, stderr }, GIT_NETWORK_TIMEOUT_MS)}`, "error");
+		ctx.ui.notify(`git pull failed: ${describePullFailure(pullResult)}`, "error");
 		return;
 	}
 

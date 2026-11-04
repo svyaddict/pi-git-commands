@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	describeFailure,
 	GIT_NETWORK_TIMEOUT_MS,
@@ -24,18 +24,18 @@ type DeleteOutcome = {
 };
 
 /** The branch other branches get merged into: origin's HEAD, else a local or remote main/master. */
-async function findBaseBranch(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
-	const originHead = await runGit(pi, cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+async function findBaseBranch(cwd: string): Promise<string | undefined> {
+	const originHead = await runGit(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
 	if (originHead.code === 0 && originHead.stdout.trim()) {
 		return originHead.stdout.trim();
 	}
 	for (const name of ["main", "master"]) {
-		if (await localBranchExists(pi, cwd, name)) {
+		if (await localBranchExists(cwd, name)) {
 			return name;
 		}
 	}
 	for (const ref of ["origin/main", "origin/master"]) {
-		const result = await runGit(pi, cwd, ["show-ref", "--verify", "--quiet", `refs/remotes/${ref}`]);
+		const result = await runGit(cwd, ["show-ref", "--verify", "--quiet", `refs/remotes/${ref}`]);
 		if (result.code === 0) {
 			return ref;
 		}
@@ -43,12 +43,12 @@ async function findBaseBranch(pi: ExtensionAPI, cwd: string): Promise<string | u
 	return undefined;
 }
 
-async function findCandidates(pi: ExtensionAPI, cwd: string): Promise<Candidate[]> {
-	const base = await findBaseBranch(pi, cwd);
+async function findCandidates(cwd: string): Promise<Candidate[]> {
+	const base = await findBaseBranch(cwd);
 	const [trackResult, mergedResult, current] = await Promise.all([
-		runGit(pi, cwd, ["for-each-ref", "refs/heads", "--format=%(refname:short)%09%(upstream:track)"]),
-		base ? runGit(pi, cwd, ["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"]) : undefined,
-		getCurrentBranch(pi, cwd),
+		runGit(cwd, ["for-each-ref", "refs/heads", "--format=%(refname:short)%09%(upstream:track)"]),
+		base ? runGit(cwd, ["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"]) : undefined,
+		getCurrentBranch(cwd),
 	]);
 
 	const protectedNames = new Set(PROTECTED_BRANCHES);
@@ -125,15 +125,9 @@ async function chooseBranches(ctx: ExtensionCommandContext, candidates: Candidat
 }
 
 /** Delete branches; `git branch` reports "Deleted branch x (was abc1234)." on stdout. */
-async function deleteBranches(
-	pi: ExtensionAPI,
-	cwd: string,
-	names: string[],
-	force: boolean,
-	outcome: DeleteOutcome,
-): Promise<void> {
+async function deleteBranches(cwd: string, names: string[], force: boolean, outcome: DeleteOutcome): Promise<void> {
 	for (const name of names) {
-		const result = await runGit(pi, cwd, ["branch", force ? "-D" : "-d", name]);
+		const result = await runGit(cwd, ["branch", force ? "-D" : "-d", name]);
 		if (result.code === 0) {
 			const was = result.stdout.match(/\(was ([0-9a-f]+)\)/)?.[1];
 			outcome.deleted.push(was ? `${name} (was ${was})` : name);
@@ -145,9 +139,9 @@ async function deleteBranches(
 	}
 }
 
-export async function handleGitCleanup(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+export async function handleGitCleanup(ctx: ExtensionCommandContext): Promise<void> {
 	// Prune first so branches whose upstream was deleted on the remote are detected as gone.
-	const fetchResult = await runGit(pi, ctx.cwd, ["fetch", "--all", "--prune"], GIT_NETWORK_TIMEOUT_MS);
+	const fetchResult = await runGit(ctx.cwd, ["fetch", "--all", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (fetchResult.code !== 0) {
 		ctx.ui.notify(
 			`git fetch failed, using local data only: ${describeFailure(fetchResult, GIT_NETWORK_TIMEOUT_MS)}`,
@@ -155,7 +149,7 @@ export async function handleGitCleanup(pi: ExtensionAPI, ctx: ExtensionCommandCo
 		);
 	}
 
-	const candidates = await findCandidates(pi, ctx.cwd);
+	const candidates = await findCandidates(ctx.cwd);
 	if (candidates.length === 0) {
 		ctx.ui.notify("No branches to clean up.", "info");
 		return;
@@ -173,7 +167,6 @@ export async function handleGitCleanup(pi: ExtensionAPI, ctx: ExtensionCommandCo
 
 	const outcome: DeleteOutcome = { deleted: [], notMerged: [], failed: [] };
 	await deleteBranches(
-		pi,
 		ctx.cwd,
 		selected.map((c) => c.name),
 		false,
@@ -190,7 +183,7 @@ export async function handleGitCleanup(pi: ExtensionAPI, ctx: ExtensionCommandCo
 		const notMerged = outcome.notMerged;
 		outcome.notMerged = [];
 		if (force) {
-			await deleteBranches(pi, ctx.cwd, notMerged, true, outcome);
+			await deleteBranches(ctx.cwd, notMerged, true, outcome);
 		} else {
 			outcome.failed.push(...notMerged.map((name) => `${name}: kept, not fully merged`));
 		}

@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AheadBehind } from "./git.ts";
@@ -73,7 +73,6 @@ export function isFooterDisabled(): boolean {
  * is disposed.
  */
 export function installGitFooter(
-	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	onRefresher: (refresh: (() => void) | undefined) => void,
 ): void {
@@ -84,7 +83,7 @@ export function installGitFooter(
 		const getSessionStats = createSessionStatsReader(ctx);
 
 		const refresh = async (): Promise<void> => {
-			const next = await getAheadBehind(pi, ctx.cwd);
+			const next = await getAheadBehind(ctx.cwd);
 			if (disposed) {
 				return;
 			}

@@ -1,9 +1,9 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { describeFailure, GIT_NETWORK_TIMEOUT_MS, getAheadBehind, getCurrentBranch, runGit } from "../git.ts";
 import { plural } from "./shared.ts";
 
-export async function handleGitFetch(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const fetchResult = await runGit(pi, ctx.cwd, ["fetch", "--all", "--prune"], GIT_NETWORK_TIMEOUT_MS);
+export async function handleGitFetch(ctx: ExtensionCommandContext): Promise<void> {
+	const fetchResult = await runGit(ctx.cwd, ["fetch", "--all", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (fetchResult.code !== 0) {
 		ctx.ui.notify(`git fetch failed: ${describeFailure(fetchResult, GIT_NETWORK_TIMEOUT_MS)}`, "error");
 		return;
@@ -17,7 +17,9 @@ export async function handleGitFetch(pi: ExtensionAPI, ctx: ExtensionCommandCont
 		parts.push(`Pruned ${plural(pruned, "stale remote-tracking branch", "stale remote-tracking branches")}.`);
 	}
 
-	const [branch, sync] = await Promise.all([getCurrentBranch(pi, ctx.cwd), getAheadBehind(pi, ctx.cwd)]);
+	// The fetch itself succeeded; the incoming count is extra information, so a failure here
+	// only leaves it out.
+	const [branch, sync] = await Promise.all([getCurrentBranch(ctx.cwd).catch(() => undefined), getAheadBehind(ctx.cwd)]);
 	if (branch && sync.available) {
 		if (sync.incoming > 0) {
 			parts.push(`'${branch}' is ${plural(sync.incoming, "commit")} behind: run /git pull to update.`);
