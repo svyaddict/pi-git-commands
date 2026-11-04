@@ -167,4 +167,4 @@ Releases are automated with GitHub Actions ([`publish.yml`](../.github/workflows
    git push --follow-tags
    ```
 
-The workflow checks that the tag is on `main` and matches `package.json`, runs the typecheck, publishes to npm and creates a GitHub Release with the changelog notes.
+The workflow checks that the tag is on `main` and matches `package.json`, runs the full CI (lint, typecheck and tests), publishes to npm and creates a GitHub Release with the changelog notes.

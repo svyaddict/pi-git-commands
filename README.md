@@ -29,6 +29,10 @@ Then start pi inside a git repository and type `/git`. Other ways to install (fr
 
 Requires git on your `PATH` and Node.js `>= 22.19.0`.
 
+### Upgrading from 0.1.x
+
+Run `pi update npm:@svyaddict/pi-git-commands` to get the latest version. Version 0.2.0 changes `/git pull`: it now only fast-forwards, whatever `pull.rebase` says. When your branch and its upstream have diverged, it reports it and leaves the branch untouched instead of merging or rebasing: integrate the changes yourself, then pull again. See the [changelog](https://github.com/svyaddict/pi-git-commands/blob/main/CHANGELOG.md) for everything new.
+
 ## Commands
 
 | Command | What it does |

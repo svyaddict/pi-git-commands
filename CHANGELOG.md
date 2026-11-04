@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
 ### Added
 
 - `/git status`: compact summary of conflicts, staged, unstaged and untracked files with ahead/behind counters.
@@ -59,5 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Autocomplete for `/git` subcommands and local branch names.
 - Git-aware footer showing the current branch with incoming/outgoing commit counters (`↓` / `↑`), refreshed periodically.
 
-[Unreleased]: https://github.com/svyaddict/pi-git-commands/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/svyaddict/pi-git-commands/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/svyaddict/pi-git-commands/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/svyaddict/pi-git-commands/releases/tag/v0.1.0
