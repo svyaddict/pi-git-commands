@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createGitAutocompleteProvider } from "./autocomplete.ts";
-import { SUBCOMMANDS, USAGE, findSubcommand } from "./commands/registry.ts";
+import { findSubcommand, SUBCOMMANDS, USAGE } from "./commands/registry.ts";
 import { installGitFooter, isFooterDisabled } from "./footer.ts";
-import { isGitRepository, listBranches } from "./git.ts";
 import type { BranchListing } from "./git.ts";
+import { isGitRepository, listBranches } from "./git.ts";
 
 const BRANCH_CACHE_MS = 2_000;
 

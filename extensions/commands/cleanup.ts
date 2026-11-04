@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-	GIT_NETWORK_TIMEOUT_MS,
 	describeFailure,
+	GIT_NETWORK_TIMEOUT_MS,
 	getCurrentBranch,
 	localBranchExists,
 	runGit,
@@ -47,9 +47,7 @@ async function findCandidates(pi: ExtensionAPI, cwd: string): Promise<Candidate[
 	const base = await findBaseBranch(pi, cwd);
 	const [trackResult, mergedResult, current] = await Promise.all([
 		runGit(pi, cwd, ["for-each-ref", "refs/heads", "--format=%(refname:short)%09%(upstream:track)"]),
-		base
-			? runGit(pi, cwd, ["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"])
-			: undefined,
+		base ? runGit(pi, cwd, ["for-each-ref", "refs/heads", "--merged", base, "--format=%(refname:short)"]) : undefined,
 		getCurrentBranch(pi, cwd),
 	]);
 
@@ -96,7 +94,10 @@ function describeCandidate(candidate: Candidate): string {
 /** Ask which candidates to delete. Returns undefined when the user cancels. */
 async function chooseBranches(ctx: ExtensionCommandContext, candidates: Candidate[]): Promise<Candidate[] | undefined> {
 	if (candidates.length === 1) {
-		const confirm = await ctx.ui.confirm("Clean up branches", `Delete local branch ${describeCandidate(candidates[0])}?`);
+		const confirm = await ctx.ui.confirm(
+			"Clean up branches",
+			`Delete local branch ${describeCandidate(candidates[0])}?`,
+		);
 		return confirm ? candidates : undefined;
 	}
 
@@ -197,7 +198,10 @@ export async function handleGitCleanup(pi: ExtensionAPI, ctx: ExtensionCommandCo
 
 	const lines: string[] = [];
 	if (outcome.deleted.length > 0) {
-		lines.push(`Deleted ${plural(outcome.deleted.length, "branch", "branches")}:`, ...outcome.deleted.map((x) => `  ${x}`));
+		lines.push(
+			`Deleted ${plural(outcome.deleted.length, "branch", "branches")}:`,
+			...outcome.deleted.map((x) => `  ${x}`),
+		);
 	}
 	if (outcome.failed.length > 0) {
 		lines.push("Not deleted:", ...outcome.failed.map((x) => `  ${x}`));

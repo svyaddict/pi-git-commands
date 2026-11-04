@@ -1,9 +1,9 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { getAheadBehind } from "./git.ts";
 import type { AheadBehind } from "./git.ts";
+import { getAheadBehind } from "./git.ts";
 import { createSessionStatsReader, formatTokens } from "./usage.ts";
 
 const GIT_SYNC_REFRESH_MS = 12_000;
@@ -35,7 +35,9 @@ function formatCwdForFooter(cwd: string, home?: string): string {
 
 function readAutoCompactEnabled(ctx: ExtensionContext): boolean {
 	try {
-		return SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() }).getCompactionEnabled();
+		return SettingsManager.create(ctx.cwd, undefined, {
+			projectTrusted: ctx.isProjectTrusted(),
+		}).getCompactionEnabled();
 	} catch {
 		return true;
 	}
@@ -114,8 +116,7 @@ export function installGitFooter(
 				const { usageTotals, latestCacheHitRate, contextUsage } = getSessionStats();
 				const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 				const contextPercentValue = contextUsage?.percent ?? 0;
-				const contextPercent =
-					contextUsage && contextUsage.percent !== null ? contextPercentValue.toFixed(1) : "?";
+				const contextPercent = contextUsage && contextUsage.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 				let pwd = formatCwdForFooter(ctx.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
 				const branch = footerData.getGitBranch();

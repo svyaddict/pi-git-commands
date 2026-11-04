@@ -1,13 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { GitExecResult } from "../git.ts";
 import {
-	GIT_NETWORK_TIMEOUT_MS,
 	describeFailure,
+	GIT_NETWORK_TIMEOUT_MS,
 	getCurrentBranch,
 	getUpstream,
 	listRemoteBranches,
 	runGit,
 } from "../git.ts";
-import type { GitExecResult } from "../git.ts";
 import { notifyCancelled, pickRemote } from "./shared.ts";
 
 function describePushFailure(result: GitExecResult): string {

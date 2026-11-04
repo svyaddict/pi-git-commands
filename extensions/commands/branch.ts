@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { BranchInfo } from "../git.ts";
 import {
 	describeFailure,
 	findRemotesWithBranch,
@@ -8,7 +9,6 @@ import {
 	runGit,
 	validateBranchName,
 } from "../git.ts";
-import type { BranchInfo } from "../git.ts";
 import { notifyCancelled, pickRemote } from "./shared.ts";
 
 function formatBranchList(branches: BranchInfo[]): string {
@@ -22,9 +22,7 @@ function formatBranchList(branches: BranchInfo[]): string {
 		return `${currentMark} ${branch.name}${localOnlyMark}`;
 	});
 
-	return ["Local branches:", ...lines, "", "* = local-only branch (not present on any remote)"]
-		.join("\n")
-		.trimEnd();
+	return ["Local branches:", ...lines, "", "* = local-only branch (not present on any remote)"].join("\n").trimEnd();
 }
 
 async function handleBranchSwitchOrCreate(
@@ -44,11 +42,7 @@ async function handleBranchSwitchOrCreate(
 
 	const remotes = await findRemotesWithBranch(pi, ctx.cwd, branchName);
 	if (remotes.length > 0) {
-		const remote = await pickRemote(
-			ctx,
-			`Branch '${branchName}' exists on several remotes. Track which one?`,
-			remotes,
-		);
+		const remote = await pickRemote(ctx, `Branch '${branchName}' exists on several remotes. Track which one?`, remotes);
 		if (!remote) {
 			notifyCancelled(ctx);
 			return;
@@ -82,7 +76,11 @@ async function handleBranchSwitchOrCreate(
 	ctx.ui.notify(`Created and switched to branch '${branchName}' from '${currentBranch}'.`, "info");
 }
 
-export async function handleGitBranch(pi: ExtensionAPI, ctx: ExtensionCommandContext, branchArg: string): Promise<void> {
+export async function handleGitBranch(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	branchArg: string,
+): Promise<void> {
 	const input = branchArg.trim();
 
 	if (!input) {

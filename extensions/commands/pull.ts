@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-	GIT_NETWORK_TIMEOUT_MS,
 	describeFailure,
 	findRemotesWithBranch,
+	GIT_NETWORK_TIMEOUT_MS,
 	getCurrentBranch,
 	getUpstream,
 	runGit,
@@ -90,10 +90,7 @@ export async function handleGitPull(pi: ExtensionAPI, ctx: ExtensionCommandConte
 			.split("\n")
 			.filter((x) => !/^From\s/.test(x) && !/->/.test(x))
 			.join("\n");
-		ctx.ui.notify(
-			`git pull failed: ${describeFailure({ ...pullResult, stderr }, GIT_NETWORK_TIMEOUT_MS)}`,
-			"error",
-		);
+		ctx.ui.notify(`git pull failed: ${describeFailure({ ...pullResult, stderr }, GIT_NETWORK_TIMEOUT_MS)}`, "error");
 		return;
 	}
 

@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { describeFailure, getAheadBehind, runGit } from "../git.ts";
 import type { AheadBehind } from "../git.ts";
+import { describeFailure, getAheadBehind, runGit } from "../git.ts";
 
 const MAX_ENTRIES_PER_SECTION = 15;
 

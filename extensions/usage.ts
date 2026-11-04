@@ -75,8 +75,7 @@ function computeUsageTotals(entries: SessionEntry[]): { usageTotals: UsageTotals
 			if (message.role === "assistant" && message.usage) {
 				addUsage(usageTotals, message.usage);
 				const cacheRead = Number(message.usage.cacheRead ?? 0);
-				const latestPromptTokens =
-					Number(message.usage.input ?? 0) + cacheRead + Number(message.usage.cacheWrite ?? 0);
+				const latestPromptTokens = Number(message.usage.input ?? 0) + cacheRead + Number(message.usage.cacheWrite ?? 0);
 				latestCacheHitRate = latestPromptTokens > 0 ? (cacheRead / latestPromptTokens) * 100 : undefined;
 				continue;
 			}

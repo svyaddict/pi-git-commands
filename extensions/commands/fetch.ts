@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { GIT_NETWORK_TIMEOUT_MS, describeFailure, getAheadBehind, getCurrentBranch, runGit } from "../git.ts";
+import { describeFailure, GIT_NETWORK_TIMEOUT_MS, getAheadBehind, getCurrentBranch, runGit } from "../git.ts";
 import { plural } from "./shared.ts";
 
 export async function handleGitFetch(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {

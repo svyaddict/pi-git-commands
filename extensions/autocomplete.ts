@@ -11,11 +11,7 @@ function makeBranchItems(listing: BranchListing, query: string): AutocompleteIte
 		.map((branch) => ({
 			value: branch.name,
 			label: `${branch.name}${branch.isLocalOnly ? "*" : ""}`,
-			description: branch.isCurrent
-				? "current branch"
-				: branch.isLocalOnly
-					? "local only"
-					: "present on remote",
+			description: branch.isCurrent ? "current branch" : branch.isLocalOnly ? "local only" : "present on remote",
 		}));
 
 	const remoteItems: AutocompleteItem[] = listing.remoteOnly
