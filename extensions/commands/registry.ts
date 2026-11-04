@@ -1,10 +1,22 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { FooterController } from "../footer.ts";
 import { handleGitBranch } from "./branch.ts";
 import { handleGitCleanup } from "./cleanup.ts";
 import { handleGitFetch } from "./fetch.ts";
+import { handleGitFooter } from "./footer.ts";
 import { handleGitPull } from "./pull.ts";
 import { handleGitPush } from "./push.ts";
 import { handleGitStatus } from "./status.ts";
+
+/** Session-scoped services that some subcommands need. */
+export type CommandServices = {
+	footer: FooterController;
+};
+
+export type Choice = {
+	value: string;
+	description: string;
+};
 
 export type Subcommand = {
 	name: string;
@@ -13,7 +25,11 @@ export type Subcommand = {
 	description: string;
 	/** Whether the subcommand accepts an argument; autocomplete then appends a space. */
 	takesArgument: boolean;
-	run(ctx: ExtensionCommandContext, args: string): Promise<void>;
+	/** Fixed argument values, suggested by autocomplete. */
+	choices?: Choice[];
+	/** Defaults to true: the subcommand only makes sense inside a git working tree. */
+	requiresRepository?: boolean;
+	run(ctx: ExtensionCommandContext, args: string, services: CommandServices): Promise<void>;
 };
 
 export const SUBCOMMANDS: Subcommand[] = [
@@ -58,6 +74,18 @@ export const SUBCOMMANDS: Subcommand[] = [
 		description: "Delete merged branches and branches whose upstream is gone",
 		takesArgument: false,
 		run: (ctx) => handleGitCleanup(ctx),
+	},
+	{
+		name: "footer",
+		usage: "footer [on|off]",
+		description: "Show or change the git footer, for every pi session",
+		takesArgument: true,
+		choices: [
+			{ value: "on", description: "Show the git footer" },
+			{ value: "off", description: "Use pi's built-in footer" },
+		],
+		requiresRepository: false,
+		run: (ctx, args, services) => handleGitFooter(ctx, args, services.footer),
 	},
 ];
 

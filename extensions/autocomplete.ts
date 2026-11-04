@@ -34,6 +34,14 @@ function makeSubcommandItems(token: string): AutocompleteItem[] {
 	}));
 }
 
+function makeChoiceItems(subcommand: string, token: string): AutocompleteItem[] {
+	const choices = SUBCOMMANDS.find((x) => x.name === subcommand)?.choices ?? [];
+	const q = token.toLowerCase();
+	return choices
+		.filter((x) => x.value.startsWith(q))
+		.map((x) => ({ value: x.value, label: x.value, description: x.description }));
+}
+
 function isGitCommandInput(text: string): boolean {
 	return /^\/git(?:\s|$)/.test(text);
 }
@@ -68,6 +76,16 @@ export function createGitAutocompleteProvider(
 					items,
 					prefix: token,
 				};
+			}
+
+			const argumentMatch = textBeforeCursor.match(/^\/git\s+(\S+)\s+(\S*)$/);
+			if (argumentMatch) {
+				const token = argumentMatch[2] ?? "";
+				const items = makeChoiceItems(argumentMatch[1] ?? "", token);
+				if (items.length > 0) {
+					return { items, prefix: token };
+				}
+				return current.getSuggestions(lines, cursorLine, cursorCol, options);
 			}
 
 			const subcommandMatch = textBeforeCursor.match(/^\/git\s+(\S*)$/);

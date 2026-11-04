@@ -3,11 +3,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AheadBehind } from "./git.ts";
-import { getAheadBehind } from "./git.ts";
+import { getAheadBehind, isGitRepository } from "./git.ts";
+import { readSettings, readSettingsOrDefaults, updateSettings } from "./settings.ts";
 import { createSessionStatsReader, formatTokens } from "./usage.ts";
 
 const GIT_SYNC_REFRESH_MS = 12_000;
-const FOOTER_ENV_VAR = "PI_GIT_FOOTER";
 
 function sanitizeStatusText(text: string): string {
 	return text
@@ -62,9 +62,76 @@ function isUsingSubscription(ctx: ExtensionContext): boolean {
 	}
 }
 
-export function isFooterDisabled(): boolean {
-	const value = process.env[FOOTER_ENV_VAR]?.trim().toLowerCase();
-	return value === "0" || value === "off" || value === "false" || value === "no";
+export type FooterStatus = {
+	/** The saved preference. */
+	enabled: boolean;
+	/** Whether this session currently shows the git footer. */
+	shown: boolean;
+	settingsPath: string;
+};
+
+/**
+ * Owns the footer of one pi session: shows it at startup when the saved preference allows it,
+ * and applies `/git footer on|off` right away. The preference itself is saved in the settings
+ * file, so every pi instance in every terminal follows it from its next start.
+ */
+export type FooterController = {
+	start(ctx: ExtensionContext): Promise<void>;
+	/** Save the preference and apply it to this session. Throws SettingsError. */
+	setEnabled(ctx: ExtensionContext, enabled: boolean): Promise<FooterStatus>;
+	/** Throws SettingsError when the settings file is unreadable. */
+	status(): Promise<FooterStatus>;
+	/** Refresh the ahead/behind counters now, if the footer is shown. */
+	refresh(): void;
+};
+
+export function createFooterController(settingsPath: string): FooterController {
+	let shown = false;
+	let requestRefresh: (() => void) | undefined;
+
+	// The footer is about git and replaces an interactive-only UI element.
+	const canShow = async (ctx: ExtensionContext) => ctx.mode === "tui" && (await isGitRepository(ctx.cwd));
+
+	const show = (ctx: ExtensionContext) => {
+		shown = true;
+		installGitFooter(ctx, (refresh) => {
+			requestRefresh = refresh;
+			if (!refresh) {
+				// Disposed: turned off, or replaced by another extension's footer.
+				shown = false;
+			}
+		});
+	};
+
+	const hide = (ctx: ExtensionContext) => {
+		ctx.ui.setFooter(undefined);
+		shown = false;
+		requestRefresh = undefined;
+	};
+
+	return {
+		async start(ctx) {
+			if ((await readSettingsOrDefaults(settingsPath)).footer && (await canShow(ctx))) {
+				show(ctx);
+			}
+		},
+		async setEnabled(ctx, enabled) {
+			const settings = await updateSettings(settingsPath, { footer: enabled });
+			if (settings.footer && !shown && (await canShow(ctx))) {
+				show(ctx);
+			} else if (!settings.footer && shown) {
+				hide(ctx);
+			}
+			return { enabled: settings.footer, shown, settingsPath };
+		},
+		async status() {
+			const settings = await readSettings(settingsPath);
+			return { enabled: settings.footer, shown, settingsPath };
+		},
+		refresh() {
+			requestRefresh?.();
+		},
+	};
 }
 
 /**
@@ -82,14 +149,31 @@ export function installGitFooter(
 		let autoCompactEnabled = readAutoCompactEnabled(ctx);
 		const getSessionStats = createSessionStatsReader(ctx);
 
+		// On slow repositories a refresh can outlast the interval: never run two at once, but
+		// remember that another one was requested so the latest state is always picked up.
+		let running = false;
+		let pending = false;
 		const refresh = async (): Promise<void> => {
-			const next = await getAheadBehind(ctx.cwd);
-			if (disposed) {
+			if (running) {
+				pending = true;
 				return;
 			}
-			sync = next;
-			autoCompactEnabled = readAutoCompactEnabled(ctx);
-			tui.requestRender();
+			running = true;
+			try {
+				const next = await getAheadBehind(ctx.cwd);
+				if (disposed) {
+					return;
+				}
+				sync = next;
+				autoCompactEnabled = readAutoCompactEnabled(ctx);
+				tui.requestRender();
+			} finally {
+				running = false;
+			}
+			if (pending && !disposed) {
+				pending = false;
+				void refresh();
+			}
 		};
 
 		void refresh();
