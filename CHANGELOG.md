@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `/git status`: compact summary of conflicts, staged, unstaged and untracked files with ahead/behind counters.
+- `/git fetch`: runs `git fetch --all --prune` and reports pruned branches and incoming commits.
+- `/git push`: pushes the current branch; without upstream it picks the remote, asks for confirmation and sets the upstream. Rejected pushes suggest `/git pull`.
+- `/git cleanup`: deletes local branches whose upstream is gone or that are merged into the default branch, after confirmation; asks before force-deleting branches merged with squash or rebase.
 - `/git branch <name>` now checks out branches that exist only on a remote, creating a local branch that tracks it (asks which remote when several have it).
 - Autocomplete also suggests remote-only branches.
 - Footer shows `(sub)` next to the cost when the active provider is subscription-backed, like the built-in footer.
@@ -20,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/git pull` now runs a single `git pull --prune` (one fetch instead of two), with a 120 s timeout and a shorter success summary.
 - Branch switching and creation use `git switch` / `git switch --create`.
-- Footer counters refresh immediately after `/git pull` and `/git branch`.
+- Footer counters refresh immediately after every `/git` command.
+- The extension is split into modules (`git.ts`, `footer.ts`, `autocomplete.ts`, one file per command) instead of a single file. Subcommands are declared in one table that drives dispatch, usage text and autocomplete.
+- Documentation moved to `docs/` (commands, footer, installation, development) and `CONTRIBUTING.md`; the README keeps features, a command table and quick install.
+- `/git <subcommand>` with unexpected arguments now reports an error instead of "Unknown command".
 
 ### Fixed
 
