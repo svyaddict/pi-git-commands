@@ -6,17 +6,24 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write # create the GitHub Release
-  id-token: write # npm trusted publishing (OIDC) + provenance
+  contents: read
 
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   publish:
     name: Publish ${{ github.ref_name }}
+    needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # npm trusted publishing (OIDC) + provenance
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,6 +63,9 @@ jobs:
             echo "::error::${NAME}@${PKG_VERSION} is already published on npm."
             exit 1
           fi
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Check package contents
         run: npm pack --dry-run
