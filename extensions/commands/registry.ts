@@ -34,7 +34,7 @@ export const SUBCOMMANDS: Subcommand[] = [
 	{
 		name: "pull",
 		usage: "pull",
-		description: "Run git pull --prune",
+		description: "Fast-forward the current branch (git pull --ff-only --prune)",
 		takesArgument: false,
 		run: (ctx) => handleGitPull(ctx),
 	},

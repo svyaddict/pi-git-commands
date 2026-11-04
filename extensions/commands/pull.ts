@@ -79,6 +79,12 @@ async function ensureUpstream(ctx: ExtensionCommandContext): Promise<boolean> {
 }
 
 export function describePullFailure(result: GitExecResult): string {
+	if (!result.killed && /Not possible to fast-forward|diverging branches|divergent branches/i.test(result.stderr)) {
+		return (
+			"your branch and its upstream have diverged, so a fast-forward is not possible. " +
+			"Nothing was changed. Rebase or merge manually (git pull --rebase or git pull --no-rebase)."
+		);
+	}
 	// Drop the fetch progress ("From <url>", "a..b main -> origin/main") that precedes the actual error.
 	const stderr = result.stderr
 		.split("\n")
@@ -92,7 +98,9 @@ export async function handleGitPull(ctx: ExtensionCommandContext): Promise<void>
 		return;
 	}
 
-	const pullResult = await runGit(ctx.cwd, ["pull", "--prune"], GIT_NETWORK_TIMEOUT_MS);
+	// --ff-only: never create merge commits or start a rebase on the user's behalf, and a
+	// fast-forward cannot leave a half-finished merge behind if it is interrupted.
+	const pullResult = await runGit(ctx.cwd, ["pull", "--ff-only", "--prune"], GIT_NETWORK_TIMEOUT_MS);
 	if (pullResult.code !== 0) {
 		ctx.ui.notify(`git pull failed: ${describePullFailure(pullResult)}`, "error");
 		return;
